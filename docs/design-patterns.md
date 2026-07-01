@@ -12,7 +12,7 @@ Implement only what you need today. Over-patterning early slows you down.
 |----------|---------|--------------|-----------|
 | 1 | Producer–Consumer | `service/` | You build the task queue + worker loop |
 | 2 | Command | `model/` + `service/` | A load test run is a single executable unit |
-| 3 | Strategy | `service/` | You support more than one transport (HTTP, mock, gRPC) |
+| 3 | Strategy | `service/` | You support more than one transport (HTTP, mock, gRPC) or response validator |
 | 4 | Builder | `model/` | Scenario/request construction gets many optional fields |
 | 5 | Claim Check | `model/` + `service/` | Payloads are large; queues carry tokens only |
 | 6 | Template Method | `service/` | Multiple test types share the same run lifecycle |
@@ -20,6 +20,7 @@ Implement only what you need today. Over-patterning early slows you down.
 | 8 | Factory | `service/` or `config/` | Worker/executor creation gets conditional |
 | 9 | Adapter | `service/` | You wrap `java.net.http` or a third-party client |
 | 10 | Facade | `service/` | Subsystems grow and callers need one simple entry point |
+| 11 | Circuit Breaker | `service/` | Repeated failures — stop hammering a dead target ([Failure Policies](./failure-policies.md)) |
 
 ---
 
@@ -82,6 +83,8 @@ LoadTestService
 ```
 
 **Tip:** Inject the strategy via constructor — Spring `@Service` + `@Bean` makes this natural.
+
+**Also use for:** `ResponseValidator` — pluggable checks for response size, content-type, and suspicious bodies ([Response Validation](./response-validation.md)).
 
 ---
 
@@ -212,6 +215,23 @@ instead of orchestrating queue, latch, executor, and client directly.
 
 ---
 
+## 11. Circuit Breaker
+
+**What:** After enough failures, stop sending new requests so you do not waste resources or overwhelm a failing target.
+
+**Where:** `service/FailureMonitor` or `service/CircuitBreaker` — workers check `shouldAbort()` before HTTP; record success/failure after each task.
+
+**Why for this project:** A smoke test should fail fast; a stress test may run to completion. Same engine, different **failure policy** ([Failure Policies](./failure-policies.md)).
+
+```text
+CLOSED  →  send requests normally
+OPEN    →  skip new HTTP; mark tasks failed or drain queue and exit
+```
+
+**Tip:** Default to `RUN_TO_COMPLETION` for stress tests. Add `FAIL_FAST` or circuit breaker when you add smoke-test mode or production-safe profiles.
+
+---
+
 ## Concurrency patterns (not GoF, but essential here)
 
 These are not classic Gang-of-Four patterns, but they are core to your architecture:
@@ -251,6 +271,7 @@ Phase 1 — Core loop
 Phase 2 — Testability
   Strategy + Adapter (HttpClient behind RequestExecutor)
   Mock executor in unit tests
+  ResponseValidator — byte limits + suspicious content checks
 
 Phase 3 — Real workloads
   Claim Check for large payloads
@@ -259,6 +280,7 @@ Phase 3 — Real workloads
 Phase 4 — Operations
   Observer for progress/metrics
   Optional SSE or WebSocket in controller
+  Failure policies + circuit breaker (FAIL_FAST for smoke, RUN_TO_COMPLETION for stress)
 ```
 
 ---
@@ -269,7 +291,9 @@ Phase 4 — Operations
 controller/     Command arrives as LoadTestRequest (HTTP JSON)
 service/        Producer–Consumer, Fan-out/Fan-in, Strategy, Facade
 model/          Command, Claim Check refs, Builder products
-config/         Factory beans (HttpClient, Executor)
+config/         Factory beans (HttpClient, Executor), response limits
 ```
+
+See also: [Response Validation](./response-validation.md) for guarding `TestResponse` / `LoadTestResponse` from oversized or suspicious target output.
 
 Code these yourself at your own pace — use this doc as a checklist, not a spec you must fulfill completely.

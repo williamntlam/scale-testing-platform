@@ -20,7 +20,9 @@ src/main/java/io/github/williamntlam/scale_testing_platform/
 │   ├── LoadTestRequest.java
 │   ├── LoadTestResponse.java
 │   ├── Task.java
-│   └── EngineResponse.java
+│   ├── TestResponse.java
+│   └── enums/
+│       └── TestStatus.java
 │
 └── config/              # Spring wiring (not a fourth MVC layer)
     └── HttpClientConfig.java
@@ -63,6 +65,8 @@ HTTP Request  →  Controller  →  Service  →  Controller  →  JSON Response
 - Run the virtual-thread engine
 - Coordinate queues, latches, and result collection
 - Call outbound HTTP (or delegate to a helper you inject)
+- **Validate target responses** — size limits, status codes, suspicious content before building `TestResponse` (see [Response Validation](./response-validation.md))
+- **Apply failure policies** — optional early abort when failures spike ([Failure Policies](./failure-policies.md))
 
 **Should not do:**
 - Parse raw HTTP request details (headers, query params) — that belongs in the controller
@@ -77,7 +81,7 @@ This is where most of your README blueprint lives.
 **Examples:**
 - `LoadTestRequest` — payloads, concurrency, target URI
 - `LoadTestResponse` — results + success/failure counts
-- `Task`, `EngineResponse` — internal execution units
+- `Task`, `TestResponse` — internal execution units
 
 **Should not do:**
 - Call services or controllers
@@ -112,8 +116,8 @@ config      →  wires beans (service, HttpClient)
 
 ## Suggested build order (for you to implement)
 
-1. **Model** — define `LoadTestRequest`, `LoadTestResponse`, `Task`, `EngineResponse`
-2. **Service** — implement the virtual-thread engine from the README
+1. **Model** — define `LoadTestRequest`, `LoadTestResponse`, `Task`, `TestResponse`
+2. **Service** — implement the virtual-thread engine from the README; cap and validate response bodies ([Response Validation](./response-validation.md))
 3. **Config** — register a shared `HttpClient` bean
 4. **Controller** — expose `POST /api/load-tests/run`
 5. **Tests** — service unit tests first (fast, no Spring), then controller tests
@@ -149,7 +153,7 @@ Content-Type: application/json
 ```json
 {
   "responses": [
-    { "taskIndex": 0, "status": "SUCCESS", "responseBody": "..." }
+    { "taskId": 0, "status": "SUCCESS", "responseBody": "..." }
   ],
   "successCount": 1,
   "failureCount": 0
