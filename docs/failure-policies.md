@@ -91,11 +91,11 @@ OPEN    →  workers stop dequeuing new tasks OR skip HTTP and mark FAILED insta
 ### Where it fits
 
 ```text
-Worker polls task from queue
+Main thread iterates payloads list
         ↓
-CircuitBreaker.allowRequest()?  ──no──→  mark FAILED ("circuit open"), skip HTTP
+CircuitBreaker.allowRequest()?  ──no──→  skip submit or mark FAILED ("circuit open")
         ↓ yes
-Send HTTP → validate response → TestResponse
+executor.submit → Send HTTP → validate response → TestResponse
         ↓
 Record success/failure → maybe trip breaker
 ```
@@ -111,14 +111,14 @@ When abort triggers, two sub-options:
 | Mode | What happens |
 |------|----------------|
 | **Hard stop** | `CountDownLatch` / interrupt workers; return partial `LoadTestResponse` |
-| **Drain queue** | Stop **feeding** new tasks; let in-flight requests finish |
+| **Drain in-flight** | Stop **submitting** new tasks; let in-flight virtual threads finish |
 | **Cancel in-flight** | Aggressive; use only if you must stop immediately |
 
-**Recommendation:** **Stop feeding the queue + drain in-flight** — cleaner metrics, fewer orphaned HTTP calls.
+**Recommendation:** **Stop submitting new tasks + drain in-flight** — cleaner metrics, fewer orphaned HTTP calls.
 
 ```text
-Main thread: stop putting tasks on queue (or set abort flag)
-Workers: finish current task, see abort flag, exit loop
+Main thread: stop the for-loop (or check abort flag before each submit)
+In-flight VTs: finish current HTTP call, write result, countDown latch
 Fan-in: await latch, return results collected so far
 ```
 
@@ -200,17 +200,17 @@ public class FailureMonitor {
 
 Workers call `recordSuccess()` / `recordFailure()` after each task.
 
-Before sending HTTP (or before dequeuing), check `shouldAbort()`.
+Before sending HTTP (or before `executor.submit`), check `shouldAbort()`.
 
 ### Thread safety
 
 All counters must be atomic — multiple virtual threads update concurrently.
 
-### Interaction with Producer–Consumer
+### Interaction with list-driven fan-out
 
-- **Producer loop:** check `shouldAbort()` before `taskBuffer.put(...)`
-- **Consumer loop:** check before `poll()` or after acquiring a task
-- Set a volatile `boolean aborted` so all workers see the flag
+- **Main loop:** check `shouldAbort()` before each `executor.submit(...)` in the `for` loop over `payloads`
+- **In-flight tasks:** already submitted VTs run to completion unless you implement cancellation (advanced)
+- Set a volatile `boolean aborted` or check `FailureMonitor.shouldAbort()` on each iteration
 
 ---
 

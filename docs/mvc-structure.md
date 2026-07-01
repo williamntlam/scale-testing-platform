@@ -63,7 +63,7 @@ HTTP Request  →  Controller  →  Service  →  Controller  →  JSON Response
 
 **Should do:**
 - Run the virtual-thread engine
-- Coordinate queues, latches, and result collection
+- Coordinate the list-driven fan-out loop, latch, and result collection
 - Call outbound HTTP (or delegate to a helper you inject)
 - **Validate target responses** — size limits, status codes, suspicious content before building `TestResponse` (see [Response Validation](./response-validation.md))
 - **Apply failure policies** — optional early abort when failures spike ([Failure Policies](./failure-policies.md))
@@ -93,6 +93,8 @@ Keep models as **immutable records** where possible (`public record ...`).
 
 **Job:** Spring `@Configuration` classes — beans like `HttpClient`, property binding.
 
+Register **one thread-safe `HttpClient` bean** here and inject it into `LoadTestService`. Pass it explicitly into each virtual thread via lambda capture — do not use `ThreadLocal`. Use `ScopedValue` only for lightweight run metadata on deep call stacks ([Enterprise Scale](./enterprise-scale.md)).
+
 Not part of classic MVC, but standard in Spring Boot projects.
 
 ---
@@ -117,7 +119,7 @@ config      →  wires beans (service, HttpClient)
 ## Suggested build order (for you to implement)
 
 1. **Model** — define `LoadTestRequest`, `LoadTestResponse`, `Task`, `TestResponse`
-2. **Service** — implement the virtual-thread engine from the README; cap and validate response bodies ([Response Validation](./response-validation.md))
+2. **Service** — implement the Loom-idiomatic engine (**one virtual thread per task**, `CountDownLatch(totalTasks)`, `AtomicReferenceArray` fan-in). See [Enterprise Scale](./enterprise-scale.md). Cap and validate response bodies ([Response Validation](./response-validation.md)).
 3. **Config** — register a shared `HttpClient` bean
 4. **Controller** — expose `POST /api/load-tests/run`
 5. **Tests** — service unit tests first (fast, no Spring), then controller tests

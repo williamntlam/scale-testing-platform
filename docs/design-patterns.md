@@ -10,11 +10,11 @@ Implement only what you need today. Over-patterning early slows you down.
 
 | Priority | Pattern | Where in MVC | Add when… |
 |----------|---------|--------------|-----------|
-| 1 | Producer–Consumer | `service/` | You build the task queue + worker loop |
+| 1 | List-driven fan-out | `service/` | You implement the core load loop (one VT per payload) |
 | 2 | Command | `model/` + `service/` | A load test run is a single executable unit |
 | 3 | Strategy | `service/` | You support more than one transport (HTTP, mock, gRPC) or response validator |
 | 4 | Builder | `model/` | Scenario/request construction gets many optional fields |
-| 5 | Claim Check | `model/` + `service/` | Payloads are large; queues carry tokens only |
+| 5 | Claim Check | `model/` + `service/` | Payloads are large; **list** carries tokens only |
 | 6 | Template Method | `service/` | Multiple test types share the same run lifecycle |
 | 7 | Observer | `service/` + `controller/` | You want live progress or metrics streaming |
 | 8 | Factory | `service/` or `config/` | Worker/executor creation gets conditional |
@@ -24,20 +24,36 @@ Implement only what you need today. Over-patterning early slows you down.
 
 ---
 
-## 1. Producer–Consumer
+## 1. List-driven fan-out (no `BlockingQueue`)
 
-**What:** Producers enqueue work; consumers (workers) dequeue and process it independently.
+**What:** The main thread iterates a flat `List` (or stream) of payload references and submits **one virtual thread per item**. The data drives execution — no intermediate task queue.
 
-**Where:** `LoadTestService` — main thread feeds `Task` objects into a `BlockingQueue`; virtual-thread workers poll from it.
+**Where:** `LoadTestService.run()` — loop over `request.payloads()`, `executor.submit(...)` per index.
 
-**Why for this project:** Decouples task submission from execution rate. The bounded queue gives natural backpressure (matches your README).
+**Why for this project:** `BlockingQueue` exists to buffer work when OS threads are scarce. Virtual threads remove that constraint. A queue adds races (`poll` timeouts), memory overhead, and platform-thread thinking ([Enterprise Scale](./enterprise-scale.md)).
 
-**Key types:**
-- Producer: loop that `put()` tasks after fan-out starts
-- Consumer: worker loop that `poll()` tasks until empty
-- Buffer: `LinkedBlockingQueue<Task>`
+```text
+for (int i = 0; i < payloads.size(); i++) {
+    final int taskId = i;
+    final String ref = payloads.get(i);
+    pacingStrategy.acquire();           // optional
+    semaphore.acquire();                // optional max in-flight
+    executor.submit(() -> runTask(taskId, ref));
+}
+done.await();
+```
 
-**Tip:** Use a timeout on `poll()` so workers can exit when the queue is drained.
+**Backpressure without a queue:**
+
+| Need | Use |
+|------|-----|
+| Max in-flight requests | `Semaphore(concurrencyLimit)` before `submit` |
+| Steady RPS | Token bucket / `pacingStrategy.acquire()` before `submit` |
+| Millions of tasks | Batch submission (submit chunk, await partial latch, repeat) |
+
+**Do not use:** `LinkedBlockingQueue<Task>`, worker loops with `poll()`, or `fanInGate(concurrencyLimit)`.
+
+**Optional:** Keep the `Task` record as a mental model (id + payload ref), but construct it inline in the loop — nothing enqueues it.
 
 ---
 
@@ -116,21 +132,41 @@ LoadTestRequest request = LoadTestRequest.builder()
 
 ## 5. Claim Check
 
-**What:** Store heavy data elsewhere; pass a lightweight reference (ticket/token) through the pipeline.
+**What:** Store heavy data elsewhere; pass a lightweight reference (ticket/token) through the pipeline. Resolve and **stream** at send time in the virtual thread — never bulk-load megabytes into the list or heap.
 
 **Where:**
-- `model/PayloadRef.java` — ID or path instead of raw bytes
-- `service/` — workers resolve the ref to actual payload before sending
+- `model/PayloadRef.java` — ID or path instead of raw bytes (optional; `String` token ok early)
+- `service/PayloadStore.java` — resolves token → `Path`, `InputStream`, or `BodyPublisher`
+- Virtual thread lambda — **worker-level resolution** immediately before HTTP POST
 
-**Why for this project:** Your README calls this out explicitly. Keeps the queue and fan-in array lightweight; avoids GC pressure from large objects in memory.
+**The memory leak paradox** — two ways Claim Check goes wrong:
+
+| Mistake | Result |
+|---------|--------|
+| Token in list + `BodyPublishers.ofString(token)` | API receives `"file:///…"`, not file bytes |
+| Full payload strings in list | Not Claim Check — OOM / GC fragmentation at millions of tasks |
+
+**Correct flow:**
 
 ```text
-Queue carries:  PayloadRef("file:///data/image-001.bin")
-Worker resolves:  byte[] body = payloadStore.read(ref)
-Sends:  HTTP POST with body
+List carries:    PayloadRef("file:///data/image-001.bin")   // lightweight
+VT resolves:     payloadStore.bodyPublisher(ref)            // stream at send
+HTTP:            BodyPublishers.ofFile(path) or chunked BodyPublisher
+Target:          receives actual bytes; heap stays pristine
 ```
 
-**Tip:** Start with inline string payloads; introduce Claim Check when you test with real binary/media files.
+```java
+// BAD — sends the token, not the file
+BodyPublishers.ofString(payloadRef);
+
+// BAD — megabytes in heap per list entry
+payloads.add(entireImageAsBase64String);
+
+// GOOD — resolve in the VT, stream from disk
+BodyPublishers.ofFile(payloadStore.resolvePath(payloadRef));
+```
+
+**Tip:** Step 2 — small inline JSON strings are fine. Introduce `PayloadStore` + streaming when you test real binary/media at scale ([Enterprise Scale](./enterprise-scale.md) § Claim Check paradox).
 
 ---
 
@@ -140,9 +176,9 @@ Sends:  HTTP POST with body
 
 **Where:** Abstract `LoadTestRunner` in `service/` with steps:
 
-1. `prepare()` — validate, build queue
-2. `executeTask(Task)` — send one request (override per protocol)
-3. `collect()` — fan-in results
+1. `prepare()` — validate request, size results array
+2. `executeTask(taskId, payloadRef)` — send one request (override per protocol)
+3. `collect()` — fan-in via latch
 4. `report()` — build response
 
 **Why for this project:** Useful when you add test types that share fan-out/fan-in but differ in the per-task step (HTTP vs ping vs custom).
@@ -181,7 +217,7 @@ ScaleTestingEngine  →  notifies  →  MetricsListener
 
 **Why for this project:** One place to tune concurrency infrastructure. Tests can substitute a factory that returns a direct executor.
 
-**Tip:** Spring `@Bean` methods in `config/` are already a factory — use explicit factory classes only when creation logic is non-trivial.
+**Tip:** Spring `@Bean` methods in `config/` are already a factory — use explicit singleton beans for `HttpClient`. Do **not** use `ThreadLocal` to reuse clients across virtual threads; see [Enterprise Scale](./enterprise-scale.md).
 
 ---
 
@@ -209,7 +245,7 @@ ScaleTestingEngine  →  notifies  →  MetricsListener
 loadTestService.run(request);
 ```
 
-instead of orchestrating queue, latch, executor, and client directly.
+instead of orchestrating latch, executor, and client directly.
 
 **Tip:** If `LoadTestService` grows too large, extract `ScaleTestingEngine` internally but keep the facade as the public API for controllers.
 
@@ -225,7 +261,7 @@ instead of orchestrating queue, latch, executor, and client directly.
 
 ```text
 CLOSED  →  send requests normally
-OPEN    →  skip new HTTP; mark tasks failed or drain queue and exit
+OPEN    →  stop submitting new tasks OR skip HTTP and mark FAILED instantly
 ```
 
 **Tip:** Default to `RUN_TO_COMPLETION` for stress tests. Add `FAIL_FAST` or circuit breaker when you add smoke-test mode or production-safe profiles.
@@ -238,10 +274,10 @@ These are not classic Gang-of-Four patterns, but they are core to your architect
 
 ### Fan-out / Fan-in
 
-- **Fan-out:** Start N workers (virtual threads) that consume from a shared queue
-- **Fan-in:** `CountDownLatch` or similar barrier; gather results from `AtomicReferenceArray` by task index
+- **Fan-out:** Submit one virtual thread per task (or paced batches at millions of tasks)
+- **Fan-in:** `CountDownLatch(totalTasks)`; gather results from `AtomicReferenceArray` by task index
 
-Documented in your README — implement this in `service/` first.
+See [Enterprise Scale](./enterprise-scale.md) for why fixed worker pools + `poll()` are an anti-pattern on Loom.
 
 ### Lock-free index assignment
 
@@ -265,8 +301,8 @@ Each task gets a unique index; workers write only to `results[taskIndex]`. No lo
 
 ```text
 Phase 1 — Core loop
-  Producer–Consumer + Fan-out/Fan-in + Command
-  (all inside LoadTestService + model records)
+  List-driven fan-out (one VT per payload) + Fan-in + Command
+  (LoadTestService + model records — see Enterprise Scale)
 
 Phase 2 — Testability
   Strategy + Adapter (HttpClient behind RequestExecutor)
@@ -274,13 +310,19 @@ Phase 2 — Testability
   ResponseValidator — byte limits + suspicious content checks
 
 Phase 3 — Real workloads
-  Claim Check for large payloads
+  Claim Check: PayloadStore resolves tokens; stream bodies at send time
+  Pacing: token bucket / target RPS
   Builder for richer scenario config
 
 Phase 4 — Operations
+  LongAdder + latency ring buffer for live metrics
   Observer for progress/metrics
   Optional SSE or WebSocket in controller
   Failure policies + circuit breaker (FAIL_FAST for smoke, RUN_TO_COMPLETION for stress)
+  Pinning detection: -Djdk.tracePinnedThreads=full
+  JVM DNS cache: networkaddress.cache.ttl=0 for load-balanced targets
+  Shared HttpClient + HTTP/2; OS ephemeral port runbook
+  JIT warm-up: ~10k discarded requests before measured run
 ```
 
 ---
@@ -289,11 +331,11 @@ Phase 4 — Operations
 
 ```text
 controller/     Command arrives as LoadTestRequest (HTTP JSON)
-service/        Producer–Consumer, Fan-out/Fan-in, Strategy, Facade
+service/        List-driven fan-out, Fan-in, Strategy, Facade
 model/          Command, Claim Check refs, Builder products
 config/         Factory beans (HttpClient, Executor), response limits
 ```
 
-See also: [Response Validation](./response-validation.md) for guarding `TestResponse` / `LoadTestResponse` from oversized or suspicious target output.
+See also: [Response Validation](./response-validation.md), [Enterprise Scale](./enterprise-scale.md).
 
 Code these yourself at your own pace — use this doc as a checklist, not a spec you must fulfill completely.

@@ -14,7 +14,7 @@ You may fire **thousands of concurrent requests**. If each worker holds a 10 MB 
 1,000 workers × 10 MB = ~10 GB in response bodies alone
 ```
 
-That defeats the purpose of your lightweight queue and claim-check design.
+That defeats the purpose of your lightweight list-driven pipeline and claim-check design.
 
 Common real-world cases:
 
