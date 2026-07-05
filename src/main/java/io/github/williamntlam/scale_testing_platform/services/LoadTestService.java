@@ -8,12 +8,19 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 
+import java.net.URI;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+
 import org.springframework.stereotype.Service;
 
 import io.github.williamntlam.scale_testing_platform.model.LoadTestRequest;
 import io.github.williamntlam.scale_testing_platform.model.LoadTestResponse;
 import io.github.williamntlam.scale_testing_platform.model.TestResponse;
 import io.github.williamntlam.scale_testing_platform.model.enums.TestStatus;
+
 
 @Service
 public class LoadTestService {
@@ -24,6 +31,34 @@ public class LoadTestService {
     public LoadTestService(HttpClient httpClient) {
         this.httpClient = httpClient;
     }
+
+    private TestResponse executeTask(int taskId, URI targetUri, String payload) throws Exception {
+
+        HttpRequest httpRequest = HttpRequest.newBuilder()
+            .uri(targetUri)
+            .POST(HttpRequest.BodyPublishers.ofString(payload))
+            .timeout(Duration.ofSeconds(30))
+            .build();
+
+        HttpResponse<byte[]> response = httpClient.send(
+            httpRequest,
+            HttpResponse.BodyHandlers.ofByteArray());
+
+        int statusCode = response.statusCode();
+        byte[] bodyBytes = response.body();
+
+        if (statusCode < 200 || statusCode >= 300) {
+            return new TestResponse(taskId, TestStatus.FAILED, "HTTP " + statusCode);
+        }
+
+        if (bodyBytes.length > MAX_RESPONSE_BYTES) {
+            return new TestResponse(taskId, TestStatus.FAILED, "[truncated: " + bodyBytes.length + " bytes]");
+        }
+
+        String body = new String(bodyBytes, StandardCharsets.UTF_8);
+        return new TestResponse(taskId, TestStatus.SUCCESS, body);
+
+    } 
 
     public LoadTestResponse run(LoadTestRequest request) throws InterruptedException {
         List<String> payloads = request.payloads();
