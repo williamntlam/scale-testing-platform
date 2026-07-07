@@ -32,6 +32,27 @@ public class LoadTestService {
         this.httpClient = httpClient;
     }
 
+    private LoadTestResponse aggregate(AtomicReferenceArray<TestResponse> results) {
+        int total = results.length();
+        TestResponse[] responses = new TestResponse[total];
+
+        int successCount = 0;
+        int failureCount = 0;
+
+        for (int index = 0; index <= total - 1; index++) {
+            TestResponse response = results.get(index);
+            responses[index] = response;
+
+            if (response.status() == TestStatus.SUCCESS) {
+                successCount += 1;
+            } else {
+                failureCount += 1;
+            }
+        }
+
+        return new LoadTestResponse(responses, successCount, failureCount);
+    }
+
     private TestResponse executeTask(int taskId, URI targetUri, String payload) throws Exception {
 
         HttpRequest httpRequest = HttpRequest.newBuilder()
