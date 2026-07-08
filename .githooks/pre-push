@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+echo "pre-push: checking Java formatting..."
+./mvnw -q spotless:check
+
+echo "pre-push: compiling and running tests..."
+./mvnw -q test
+
+echo "pre-push: build passed."
