@@ -26,9 +26,7 @@ class LoadTestServiceTest {
   void run_singlePayload_returnsSuccess() throws Exception {
     LoadTestRequest request =
         new LoadTestRequest(
-            List.of("{\"event\":\"ping\"}"),
-            1,
-            URI.create("https://httpbin.org/post"));
+            List.of("{\"event\":\"ping\"}"), 1, URI.create("https://httpbin.org/post"));
 
     LoadTestResponse response = service.run(request);
 
