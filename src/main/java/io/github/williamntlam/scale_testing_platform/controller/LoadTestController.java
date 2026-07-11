@@ -12,15 +12,14 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/load-tests")
 public class LoadTestController {
 
-    private final LoadTestService loadTestService;
+  private final LoadTestService loadTestService;
 
-    public LoadTestController(LoadTestService loadTestService) {
-        this.loadTestService = loadTestService;
-    }
+  public LoadTestController(LoadTestService loadTestService) {
+    this.loadTestService = loadTestService;
+  }
 
-    @PostMapping("/run")
-    public LoadTestResponse run(@RequestBody LoadTestRequest request) throws InterruptedException {
-        return loadTestService.run(request);
-    }
-
+  @PostMapping("/run")
+  public LoadTestResponse run(@RequestBody LoadTestRequest request) throws InterruptedException {
+    return loadTestService.run(request);
+  }
 }
