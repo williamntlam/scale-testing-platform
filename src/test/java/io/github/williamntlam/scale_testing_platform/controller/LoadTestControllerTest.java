@@ -28,9 +28,7 @@ class LoadTestControllerTest {
   void run_returnsLoadTestResponse() throws Exception {
     LoadTestResponse mockResponse =
         new LoadTestResponse(
-            new TestResponse[] {new TestResponse(0, TestStatus.SUCCESS, "ok")},
-            1,
-            0);
+            new TestResponse[] {new TestResponse(0, TestStatus.SUCCESS, "ok")}, 1, 0);
 
     when(loadTestService.run(any())).thenReturn(mockResponse);
 
