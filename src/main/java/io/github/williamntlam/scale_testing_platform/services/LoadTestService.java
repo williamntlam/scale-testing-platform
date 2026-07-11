@@ -5,11 +5,7 @@ import io.github.williamntlam.scale_testing_platform.model.LoadTestResponse;
 import io.github.williamntlam.scale_testing_platform.model.TestResponse;
 import io.github.williamntlam.scale_testing_platform.model.enums.TestStatus;
 import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -22,10 +18,10 @@ import org.springframework.stereotype.Service;
 public class LoadTestService {
 
   private static final int MAX_RESPONSE_BYTES = 65_536;
-  private final HttpClient httpClient;
+  private final RequestExecutor requestExecutor;
 
-  public LoadTestService(HttpClient httpClient) {
-    this.httpClient = httpClient;
+  public LoadTestService(RequestExecutor requestExecutor) {
+    this.requestExecutor = requestExecutor;
   }
 
   private LoadTestResponse aggregate(AtomicReferenceArray<TestResponse> results) {
@@ -50,16 +46,7 @@ public class LoadTestService {
   }
 
   private TestResponse executeTask(int taskId, URI targetUri, String payload) throws Exception {
-
-    HttpRequest httpRequest =
-        HttpRequest.newBuilder()
-            .uri(targetUri)
-            .POST(HttpRequest.BodyPublishers.ofString(payload))
-            .timeout(Duration.ofSeconds(30))
-            .build();
-
-    HttpResponse<byte[]> response =
-        httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofByteArray());
+    OutboundResponse response = requestExecutor.send(targetUri, payload);
 
     int statusCode = response.statusCode();
     byte[] bodyBytes = response.body();

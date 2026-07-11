@@ -19,7 +19,8 @@ class LoadTestServiceTest {
   @BeforeEach
   void setUp() {
     HttpClient httpClient = HttpClient.newHttpClient();
-    service = new LoadTestService(httpClient);
+    RequestExecutor requestExecutor = new HttpRequestExecutor(httpClient);
+    service = new LoadTestService(requestExecutor);
   }
 
   @Test
@@ -55,5 +56,18 @@ class LoadTestServiceTest {
       assertEquals(TestStatus.SUCCESS, response.responses()[i].status());
       assertEquals(i, response.responses()[i].taskId());
     }
+  }
+
+  @Test
+  void run_http500_returnsFailure() throws Exception {
+    LoadTestRequest request =
+        new LoadTestRequest(
+            List.of("{\"event\":\"ping\"}"), 1, URI.create("https://httpbin.org/status/500"));
+
+    LoadTestResponse response = service.run(request);
+
+    assertEquals(1, response.failureCount());
+    assertEquals(0, response.successCount());
+    assertEquals(TestStatus.FAILED, response.responses()[0].status());
   }
 }
