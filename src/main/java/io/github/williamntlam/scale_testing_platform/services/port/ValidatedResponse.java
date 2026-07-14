@@ -1,4 +1,4 @@
-package io.github.williamntlam.scale_testing_platform.services;
+package io.github.williamntlam.scale_testing_platform.services.port;
 
 import io.github.williamntlam.scale_testing_platform.model.enums.TestStatus;
 

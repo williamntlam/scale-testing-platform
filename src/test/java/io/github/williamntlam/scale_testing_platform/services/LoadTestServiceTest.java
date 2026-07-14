@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import io.github.williamntlam.scale_testing_platform.model.LoadTestRequest;
 import io.github.williamntlam.scale_testing_platform.model.LoadTestResponse;
 import io.github.williamntlam.scale_testing_platform.model.enums.TestStatus;
+import io.github.williamntlam.scale_testing_platform.services.port.RequestExecutor;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.util.List;

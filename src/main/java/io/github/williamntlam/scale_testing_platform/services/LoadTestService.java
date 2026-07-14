@@ -4,6 +4,8 @@ import io.github.williamntlam.scale_testing_platform.model.LoadTestRequest;
 import io.github.williamntlam.scale_testing_platform.model.LoadTestResponse;
 import io.github.williamntlam.scale_testing_platform.model.TestResponse;
 import io.github.williamntlam.scale_testing_platform.model.enums.TestStatus;
+import io.github.williamntlam.scale_testing_platform.services.port.OutboundResponse;
+import io.github.williamntlam.scale_testing_platform.services.port.RequestExecutor;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.List;

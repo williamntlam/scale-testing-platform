@@ -1,5 +1,7 @@
 package io.github.williamntlam.scale_testing_platform.services;
 
+import io.github.williamntlam.scale_testing_platform.services.port.OutboundResponse;
+import io.github.williamntlam.scale_testing_platform.services.port.RequestExecutor;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
