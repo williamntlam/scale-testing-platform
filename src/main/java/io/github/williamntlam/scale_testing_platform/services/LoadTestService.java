@@ -6,8 +6,9 @@ import io.github.williamntlam.scale_testing_platform.model.TestResponse;
 import io.github.williamntlam.scale_testing_platform.model.enums.TestStatus;
 import io.github.williamntlam.scale_testing_platform.services.port.OutboundResponse;
 import io.github.williamntlam.scale_testing_platform.services.port.RequestExecutor;
+import io.github.williamntlam.scale_testing_platform.services.port.ResponseValidator;
+import io.github.williamntlam.scale_testing_platform.services.port.ValidatedResponse;
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -19,11 +20,12 @@ import org.springframework.stereotype.Service;
 @Service
 public class LoadTestService {
 
-  private static final int MAX_RESPONSE_BYTES = 65_536;
   private final RequestExecutor requestExecutor;
+  private final ResponseValidator responseValidator;
 
-  public LoadTestService(RequestExecutor requestExecutor) {
+  public LoadTestService(RequestExecutor requestExecutor, ResponseValidator responseValidator) {
     this.requestExecutor = requestExecutor;
+    this.responseValidator = responseValidator;
   }
 
   private LoadTestResponse aggregate(AtomicReferenceArray<TestResponse> results) {
@@ -50,20 +52,10 @@ public class LoadTestService {
   private TestResponse executeTask(int taskId, URI targetUri, String payload) throws Exception {
     OutboundResponse response = requestExecutor.send(targetUri, payload);
 
-    int statusCode = response.statusCode();
-    byte[] bodyBytes = response.body();
+    ValidatedResponse validated =
+        responseValidator.validate(response.statusCode(), response.body());
 
-    if (statusCode < 200 || statusCode >= 300) {
-      return new TestResponse(taskId, TestStatus.FAILED, "HTTP " + statusCode);
-    }
-
-    if (bodyBytes.length > MAX_RESPONSE_BYTES) {
-      return new TestResponse(
-          taskId, TestStatus.FAILED, "[truncated: " + bodyBytes.length + " bytes]");
-    }
-
-    String body = new String(bodyBytes, StandardCharsets.UTF_8);
-    return new TestResponse(taskId, TestStatus.SUCCESS, body);
+    return new TestResponse(taskId, validated.status(), validated.safeBody());
   }
 
   public LoadTestResponse run(LoadTestRequest request) throws InterruptedException {

@@ -7,6 +7,7 @@ import io.github.williamntlam.scale_testing_platform.model.LoadTestRequest;
 import io.github.williamntlam.scale_testing_platform.model.LoadTestResponse;
 import io.github.williamntlam.scale_testing_platform.model.enums.TestStatus;
 import io.github.williamntlam.scale_testing_platform.services.port.RequestExecutor;
+import io.github.williamntlam.scale_testing_platform.services.port.ResponseValidator;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.util.List;
@@ -21,7 +22,8 @@ class LoadTestServiceTest {
   void setUp() {
     HttpClient httpClient = HttpClient.newHttpClient();
     RequestExecutor requestExecutor = new HttpRequestExecutor(httpClient);
-    service = new LoadTestService(requestExecutor);
+    ResponseValidator responseValidator = new DefaultResponseValidator();
+    service = new LoadTestService(requestExecutor, responseValidator);
   }
 
   @Test
