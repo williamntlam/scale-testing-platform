@@ -8,86 +8,85 @@ Implement only what you need today. Over-patterning early slows you down.
 
 ## Priority overview
 
-| Priority | Pattern | Where in MVC | Add when… |
-|----------|---------|--------------|-----------|
-| 1 | List-driven fan-out | `service/` | You implement the core load loop (one VT per payload) |
-| 2 | Command | `model/` + `service/` | A load test run is a single executable unit |
-| 3 | Strategy | `service/` | You support more than one transport (HTTP, mock, gRPC) or response validator |
-| 4 | Builder | `model/` | Scenario/request construction gets many optional fields |
-| 5 | Claim Check | `model/` + `service/` | Payloads are large; **list** carries tokens only |
-| 6 | Template Method | `service/` | Multiple test types share the same run lifecycle |
-| 7 | Observer | `service/` + `controller/` | You want live progress or metrics streaming |
-| 8 | Factory | `service/` or `config/` | Worker/executor creation gets conditional |
-| 9 | Adapter | `service/` | You wrap `java.net.http` or a third-party client |
-| 10 | Facade | `service/` | Subsystems grow and callers need one simple entry point |
-| 11 | Circuit Breaker | `service/` | Repeated failures — stop hammering a dead target ([Failure Policies](./failure-policies.md)) |
+| Priority | Pattern | Where in MVC | Status |
+|----------|---------|--------------|--------|
+| 1 | List-driven fan-out | `services/` | **Done** — one VT per payload |
+| 2 | Command | `model/` + `services/` | **Done** — `LoadTestRequest` as the executable unit |
+| 3 | Strategy | `services/port/` | **Done** — `RequestExecutor` + `HttpRequestExecutor` |
+| 4 | Adapter | `services/` | **Done** — `HttpRequestExecutor` wraps `java.net.http` |
+| 5 | Facade | `services/` | **Done** — `LoadTestService.run(request)` |
+| 6 | Factory | `config/` | **Done** — `@Bean HttpClient` in `HttpClientConfig` |
+| 7 | Builder | `model/` | Planned — when requests gain many optional fields |
+| 8 | Claim Check | `model/` + `services/` | Planned — list carries tokens only |
+| 9 | Template Method | `services/` | Planned — multiple test types sharing lifecycle |
+| 10 | Observer | `services/` + `controller/` | Planned — live progress / metrics |
+| 11 | Circuit Breaker | `services/` | Planned — repeated failures ([Failure Policies](./failure-policies.md)) |
+| — | ResponseValidator (Strategy) | `services/` | Planned — `ValidatedResponse` record already exists |
 
 ---
 
-## 1. List-driven fan-out (no `BlockingQueue`)
+## 1. List-driven fan-out (no `BlockingQueue`) — done
 
-**What:** The main thread iterates a flat `List` (or stream) of payload references and submits **one virtual thread per item**. The data drives execution — no intermediate task queue.
+**What:** The main thread iterates a flat `List` of payload references and submits **one virtual thread per item**. The data drives execution — no intermediate task queue.
 
-**Where:** `LoadTestService.run()` — loop over `request.payloads()`, `executor.submit(...)` per index.
+**Where:** `LoadTestService.run()` — loop over `request.payloads()`, `inFlight.acquire()`, then `executor.submit(...)` per index.
 
 **Why for this project:** `BlockingQueue` exists to buffer work when OS threads are scarce. Virtual threads remove that constraint. A queue adds races (`poll` timeouts), memory overhead, and platform-thread thinking ([Enterprise Scale](./enterprise-scale.md)).
 
 ```text
 for (int i = 0; i < payloads.size(); i++) {
     final int taskId = i;
-    final String ref = payloads.get(i);
-    pacingStrategy.acquire();           // optional
-    semaphore.acquire();                // optional max in-flight
-    executor.submit(() -> runTask(taskId, ref));
+    final String payload = payloads.get(i);
+    inFlight.acquire();                 // max in-flight (done)
+    // pacingStrategy.acquire();        // optional RPS (planned)
+    executor.submit(() -> runTask(taskId, payload));
 }
 done.await();
 ```
 
 **Backpressure without a queue:**
 
-| Need | Use |
-|------|-----|
-| Max in-flight requests | `Semaphore(concurrencyLimit)` before `submit` |
-| Steady RPS | Token bucket / `pacingStrategy.acquire()` before `submit` |
-| Millions of tasks | Batch submission (submit chunk, await partial latch, repeat) |
+| Need | Use | Status |
+|------|-----|--------|
+| Max in-flight requests | `Semaphore(concurrencyLimit)` before `submit` | **Done** |
+| Steady RPS | Token bucket / `pacingStrategy.acquire()` before `submit` | Planned |
+| Millions of tasks | Batch submission (submit chunk, await partial latch, repeat) | Planned |
 
 **Do not use:** `LinkedBlockingQueue<Task>`, worker loops with `poll()`, or `fanInGate(concurrencyLimit)`.
 
-**Optional:** Keep the `Task` record as a mental model (id + payload ref), but construct it inline in the loop — nothing enqueues it.
+**Optional:** Keep the `Task` record as a mental model (id + payload ref), but the engine currently binds id from the loop index and passes the payload string into the lambda directly.
 
 ---
 
-## 2. Command
+## 2. Command — done
 
 **What:** Encapsulate a request as an object with everything needed to execute it.
 
 **Where:**
-- `model/LoadTestCommand.java` (or reuse `LoadTestRequest`) — payloads, concurrency, target URI
-- `service/LoadTestService.run(command)` — executes without caring where the command came from
+- `model/LoadTestRequest.java` — payloads, concurrency, target URI
+- `services/LoadTestService.run(request)` — executes without caring where the command came from
 
 **Why for this project:** Same run logic whether triggered by REST, CLI, or a scheduled job later. Easy to log, replay, or queue commands.
 
-**Example shape:**
-
 ```java
-public record LoadTestCommand(
+public record LoadTestRequest(
     List<String> payloads,
     int concurrencyLimit,
     URI targetUri
 ) {}
 ```
 
-**Tip:** Validate in the record compact constructor (non-null payloads, concurrency ≥ 1).
+Validation lives in the record compact constructor (non-empty payloads, concurrency ≥ 1, non-null URI).
 
 ---
 
-## 3. Strategy
+## 3. Strategy — done (transport); planned (validators)
 
 **What:** Define a family of algorithms behind one interface; swap implementations at runtime.
 
 **Where:**
-- Interface: `RequestExecutor` or `OutboundClient` in `service/` (or `service/port/`)
-- Implementations: `HttpRequestExecutor`, `MockRequestExecutor`, later `GrpcRequestExecutor`
+- Interface: `services/port/RequestExecutor`
+- Implementations: `HttpRequestExecutor` (production); mock executor in tests later
 
 **Why for this project:** Unit-test the engine without real network I/O. Add protocols without rewriting the worker loop.
 
@@ -95,16 +94,16 @@ public record LoadTestCommand(
 LoadTestService
     └── uses RequestExecutor (interface)
             ├── HttpRequestExecutor
-            └── MockRequestExecutor  (tests)
+            └── MockRequestExecutor  (tests — optional)
 ```
 
-**Tip:** Inject the strategy via constructor — Spring `@Service` + `@Bean` makes this natural.
+Injected via constructor — Spring wires `HttpRequestExecutor` as a `@Component`.
 
-**Also use for:** `ResponseValidator` — pluggable checks for response size, content-type, and suspicious bodies ([Response Validation](./response-validation.md)).
+**Also use for (planned):** `ResponseValidator` — pluggable checks for response size, content-type, and suspicious bodies. Basic size/status checks are currently **inline** in `LoadTestService.executeTask` ([Response Validation](./response-validation.md)).
 
 ---
 
-## 4. Builder
+## 4. Builder — planned
 
 **What:** Construct complex objects step-by-step instead of telescoping constructors.
 
@@ -126,17 +125,17 @@ LoadTestRequest request = LoadTestRequest.builder()
     .build();
 ```
 
-**Tip:** Use a builder when you have **3+ optional parameters**. Until then, a record is enough.
+**Tip:** Use a builder when you have **3+ optional parameters**. Until then, the current record is enough.
 
 ---
 
-## 5. Claim Check
+## 5. Claim Check — planned
 
 **What:** Store heavy data elsewhere; pass a lightweight reference (ticket/token) through the pipeline. Resolve and **stream** at send time in the virtual thread — never bulk-load megabytes into the list or heap.
 
 **Where:**
 - `model/PayloadRef.java` — ID or path instead of raw bytes (optional; `String` token ok early)
-- `service/PayloadStore.java` — resolves token → `Path`, `InputStream`, or `BodyPublisher`
+- `services/PayloadStore.java` — resolves token → `Path`, `InputStream`, or `BodyPublisher`
 - Virtual thread lambda — **worker-level resolution** immediately before HTTP POST
 
 **The memory leak paradox** — two ways Claim Check goes wrong:
@@ -166,15 +165,15 @@ payloads.add(entireImageAsBase64String);
 BodyPublishers.ofFile(payloadStore.resolvePath(payloadRef));
 ```
 
-**Tip:** Step 2 — small inline JSON strings are fine. Introduce `PayloadStore` + streaming when you test real binary/media at scale ([Enterprise Scale](./enterprise-scale.md) § Claim Check paradox).
+**Today:** small inline JSON strings are posted with `ofString` — fine for smoke tests. Introduce `PayloadStore` + streaming when you test real binary/media at scale ([Enterprise Scale](./enterprise-scale.md) § Claim Check paradox).
 
 ---
 
-## 6. Template Method
+## 6. Template Method — planned
 
 **What:** Define the skeleton of an algorithm in a base class; subclasses override specific steps.
 
-**Where:** Abstract `LoadTestRunner` in `service/` with steps:
+**Where:** Abstract `LoadTestRunner` in `services/` with steps:
 
 1. `prepare()` — validate request, size results array
 2. `executeTask(taskId, payloadRef)` — send one request (override per protocol)
@@ -183,16 +182,16 @@ BodyPublishers.ofFile(payloadStore.resolvePath(payloadRef));
 
 **Why for this project:** Useful when you add test types that share fan-out/fan-in but differ in the per-task step (HTTP vs ping vs custom).
 
-**Alternative in Java:** Prefer a **functional interface** + composition over inheritance unless you truly have a class hierarchy.
+**Alternative in Java:** Prefer a **functional interface** + composition over inheritance unless you truly have a class hierarchy. The current `RequestExecutor` Strategy already covers the per-task HTTP step.
 
 ---
 
-## 7. Observer
+## 7. Observer — planned
 
 **What:** Subject notifies listeners when state changes; listeners react without the subject knowing details.
 
 **Where:**
-- `service/LoadTestProgressListener` — `onTaskCompleted`, `onRunFinished`
+- `services/LoadTestProgressListener` — `onTaskCompleted`, `onRunFinished`
 - Optional SSE endpoint in `controller/` for live dashboards
 
 **Why for this project:** Long-running tests need progress. Observers keep metrics/logging out of the hot worker loop.
@@ -207,25 +206,23 @@ ScaleTestingEngine  →  notifies  →  MetricsListener
 
 ---
 
-## 8. Factory
+## 8. Factory — done
 
 **What:** Centralize object creation so callers do not `new` concrete types directly.
 
-**Where:**
-- `config/ExecutorFactory` — create virtual-thread executor with consistent settings
-- `config/HttpClientFactory` — shared timeouts, HTTP/2, redirect policy
+**Where:** `config/HttpClientConfig` — shared HTTP/2 client, timeouts, redirect policy.
 
-**Why for this project:** One place to tune concurrency infrastructure. Tests can substitute a factory that returns a direct executor.
+**Why for this project:** One place to tune concurrency infrastructure. Tests can substitute a different executor or client.
 
-**Tip:** Spring `@Bean` methods in `config/` are already a factory — use explicit singleton beans for `HttpClient`. Do **not** use `ThreadLocal` to reuse clients across virtual threads; see [Enterprise Scale](./enterprise-scale.md).
+**Tip:** Spring `@Bean` methods in `config/` are already a factory. Do **not** use `ThreadLocal` to reuse clients across virtual threads; see [Enterprise Scale](./enterprise-scale.md).
 
 ---
 
-## 9. Adapter
+## 9. Adapter — done
 
 **What:** Wrap an existing class with an interface your code expects.
 
-**Where:** `HttpClientAdapter implements RequestExecutor` — wraps `java.net.http.HttpClient` behind your Strategy interface.
+**Where:** `HttpRequestExecutor implements RequestExecutor` — wraps `java.net.http.HttpClient` behind the Strategy interface. Returns `OutboundResponse(statusCode, body)`.
 
 **Why for this project:** Keeps `LoadTestService` free of `HttpRequest`/`HttpResponse` details. Swap the adapter if you change HTTP libraries.
 
@@ -233,11 +230,11 @@ ScaleTestingEngine  →  notifies  →  MetricsListener
 
 ---
 
-## 10. Facade
+## 10. Facade — done
 
 **What:** Provide a simple interface over a complex subsystem.
 
-**Where:** `LoadTestService` itself can act as a facade over engine + HTTP + metrics.
+**Where:** `LoadTestService` itself acts as a facade over the executor, latch, semaphore, and aggregation.
 
 **Why for this project:** Controllers stay thin — one call:
 
@@ -245,17 +242,15 @@ ScaleTestingEngine  →  notifies  →  MetricsListener
 loadTestService.run(request);
 ```
 
-instead of orchestrating latch, executor, and client directly.
-
 **Tip:** If `LoadTestService` grows too large, extract `ScaleTestingEngine` internally but keep the facade as the public API for controllers.
 
 ---
 
-## 11. Circuit Breaker
+## 11. Circuit Breaker — planned
 
 **What:** After enough failures, stop sending new requests so you do not waste resources or overwhelm a failing target.
 
-**Where:** `service/FailureMonitor` or `service/CircuitBreaker` — workers check `shouldAbort()` before HTTP; record success/failure after each task.
+**Where:** `services/FailureMonitor` or `services/CircuitBreaker` — workers check `shouldAbort()` before HTTP; record success/failure after each task.
 
 **Why for this project:** A smoke test should fail fast; a stress test may run to completion. Same engine, different **failure policy** ([Failure Policies](./failure-policies.md)).
 
@@ -264,22 +259,20 @@ CLOSED  →  send requests normally
 OPEN    →  stop submitting new tasks OR skip HTTP and mark FAILED instantly
 ```
 
-**Tip:** Default to `RUN_TO_COMPLETION` for stress tests. Add `FAIL_FAST` or circuit breaker when you add smoke-test mode or production-safe profiles.
+**Today:** runs always process every payload (`RUN_TO_COMPLETION` behavior). Add `FAIL_FAST` or circuit breaker when you add smoke-test mode or production-safe profiles.
 
 ---
 
 ## Concurrency patterns (not GoF, but essential here)
 
-These are not classic Gang-of-Four patterns, but they are core to your architecture:
+### Fan-out / Fan-in — done
 
-### Fan-out / Fan-in
-
-- **Fan-out:** Submit one virtual thread per task (or paced batches at millions of tasks)
+- **Fan-out:** Submit one virtual thread per task
 - **Fan-in:** `CountDownLatch(totalTasks)`; gather results from `AtomicReferenceArray` by task index
 
 See [Enterprise Scale](./enterprise-scale.md) for why fixed worker pools + `poll()` are an anti-pattern on Loom.
 
-### Lock-free index assignment
+### Lock-free index assignment — done
 
 Each task gets a unique index; workers write only to `results[taskIndex]`. No locks on the result array.
 
@@ -297,24 +290,24 @@ Each task gets a unique index; workers write only to `results[taskIndex]`. No lo
 
 ---
 
-## Suggested implementation roadmap
+## Implementation roadmap
 
 ```text
-Phase 1 — Core loop
+Phase 1 — Core loop                          ✅ DONE
   List-driven fan-out (one VT per payload) + Fan-in + Command
-  (LoadTestService + model records — see Enterprise Scale)
+  Semaphore concurrency + shared HttpClient
 
-Phase 2 — Testability
+Phase 2 — Testability                        ✅ mostly DONE
   Strategy + Adapter (HttpClient behind RequestExecutor)
-  Mock executor in unit tests
-  ResponseValidator — byte limits + suspicious content checks
+  Inline response size/status checks
+  Remaining: MockRequestExecutor in unit tests; ResponseValidator extraction
 
-Phase 3 — Real workloads
+Phase 3 — Real workloads                     Planned
   Claim Check: PayloadStore resolves tokens; stream bodies at send time
   Pacing: token bucket / target RPS
   Builder for richer scenario config
 
-Phase 4 — Operations
+Phase 4 — Operations                         Planned
   LongAdder + latency ring buffer for live metrics
   Observer for progress/metrics
   Optional SSE or WebSocket in controller
@@ -330,12 +323,13 @@ Phase 4 — Operations
 ## Quick reference: pattern → package
 
 ```text
-controller/     Command arrives as LoadTestRequest (HTTP JSON)
-service/        List-driven fan-out, Fan-in, Strategy, Facade
-model/          Command, Claim Check refs, Builder products
-config/         Factory beans (HttpClient, Executor), response limits
+controller/        Command arrives as LoadTestRequest (HTTP JSON)
+services/          List-driven fan-out, Fan-in, Facade, Adapter
+services/port/     Strategy interfaces (RequestExecutor) + DTOs
+model/             Command, Claim Check refs (future), Builder products (future)
+config/            Factory beans (HttpClient)
 ```
 
 See also: [Response Validation](./response-validation.md), [Enterprise Scale](./enterprise-scale.md).
 
-Code these yourself at your own pace — use this doc as a checklist, not a spec you must fulfill completely.
+Use this doc as a checklist for what is left — core Strategy/Facade/fan-out pieces are already in the tree.

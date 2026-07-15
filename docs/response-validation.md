@@ -2,7 +2,23 @@
 
 When your workers receive HTTP responses from the target system, **do not trust them blindly**. A misconfigured endpoint, error page, or hostile target can return huge or unexpected bodies. Under high concurrency, that can cause **out-of-memory (OOM) errors**, **GC pauses**, or **misleading success metrics**.
 
-Validate and sanitize responses in the **`service/`** layer **after** the HTTP call and **before** you build a `TestResponse` or `LoadTestResponse`.
+Validate and sanitize responses in the **`services/`** layer **after** the HTTP call and **before** you build a `TestResponse` or `LoadTestResponse`.
+
+---
+
+## Current status
+
+| Check | Status | Where |
+|-------|--------|--------|
+| Non-2xx → `FAILED` | **Done** | `LoadTestService.executeTask` |
+| Body length > 65,536 → `FAILED` with `[truncated: N bytes]` | **Done** | `LoadTestService` (`MAX_RESPONSE_BYTES`) |
+| Read as `byte[]` (not unbounded stream into String first) | **Done** | `HttpRequestExecutor` uses `BodyHandlers.ofByteArray()` |
+| Content-Type allowlist | Planned | — |
+| Suspicious content patterns (HTML, stack traces) | Planned | — |
+| Sensitive-data redaction | Planned | — |
+| Pluggable `ResponseValidator` Strategy | Planned | `ValidatedResponse` record exists in `services/port/` |
+
+**Minimum viable guard is already in place.** Expand into a dedicated validator when checks grow.
 
 ---
 
@@ -23,37 +39,37 @@ Common real-world cases:
 | Wrong URL | HTML 404 page from a proxy | Large body, looks like "success" if you only check HTTP 200 |
 | API gateway error | JSON or HTML error payload | Misleading `responseBody` in results |
 | Compromised / malicious target | Multi-megabyte or deeply nested JSON | OOM, slow parsing |
-| Redirect misconfiguration | Login page HTML | Huge body, sensitive content in logs |
+| Redirect misconfiguration | Login page HTML | Huge body, sensitive content in logs *(client currently never follows redirects)* |
 | Debug endpoint left on | Stack traces | Large + sensitive |
 
 ---
 
 ## What to check
 
-### 1. HTTP status code
+### 1. HTTP status code — done
 
 Treat non-2xx as failure even if the body parses:
 
 ```text
 2xx → candidate for SUCCESS (after other checks)
-4xx / 5xx → FAILED
+4xx / 5xx → FAILED  ("HTTP {statusCode}")
 ```
 
 Do not rely on body content alone.
 
-### 2. Response body size
+### 2. Response body size — done (fixed 64 KB)
 
-Set a **hard max byte limit** per response (start with **64 KB–256 KB** for JSON APIs; tune per workload).
+Hard max is currently **`MAX_RESPONSE_BYTES = 65_536`** in `LoadTestService`.
 
 | Over limit | Action |
 |------------|--------|
-| Body too large | Mark `TestStatus.FAILED` (or `SUSPICIOUS`) |
-| Store in `TestResponse` | Truncated summary only, e.g. `"[truncated: 2.4 MB]"` |
-| Never | Store the full body in memory or return it in `LoadTestResponse` |
+| Body too large | Mark `TestStatus.FAILED` |
+| Store in `TestResponse` | `"[truncated: N bytes]"` only |
+| Never | Store the full oversize body in `LoadTestResponse` |
 
-Use `HttpResponse.BodyHandlers.ofByteArray()` or a **limited InputStream** so you never read unbounded data into a `String`.
+**Gap to close later:** prefer a **limited InputStream** / capped reader so oversized responses are never fully buffered in `byte[]` first. Today `ofByteArray()` still loads the entire response into memory before the length check.
 
-### 3. Content-Type
+### 3. Content-Type — planned
 
 If you expect JSON from the target:
 
@@ -64,7 +80,7 @@ Received: text/html  →  flag as suspicious / failed
 
 Allow a small allowlist (e.g. `application/json`, `application/problem+json`).
 
-### 4. Suspicious content patterns
+### 4. Suspicious content patterns — planned
 
 Flag (do not necessarily fail the whole run) when the body:
 
@@ -76,7 +92,7 @@ Flag (do not necessarily fail the whole run) when the body:
 
 Keep checks **cheap** (prefix scan, length, headers) — avoid full JSON parse on every response in the hot path unless you need it.
 
-### 5. Sensitive data
+### 5. Sensitive data — planned
 
 Do not echo back into `LoadTestResponse`:
 
@@ -90,9 +106,10 @@ Prefer storing **length + hash prefix** or **first N characters** for debugging.
 ## Where it fits in MVC
 
 ```text
-Worker receives HttpResponse
+Worker receives OutboundResponse
         ↓
-service/ResponseValidator.validate(response)   ← you implement this
+LoadTestService.executeTask (inline checks today)
+  — later: services/ResponseValidator.validate(...)
         ↓
 TestResponse(taskId, status, safeSummary)      ← small, bounded
         ↓
@@ -101,25 +118,32 @@ LoadTestResponse (aggregated, still bounded)
 
 | Layer | Responsibility |
 |-------|----------------|
-| **`service/`** | Size limits, status checks, truncation, suspicious detection |
+| **`services/`** | Size limits, status checks, truncation, suspicious detection |
 | **`model/`** | Hold **validated** `TestResponse` — optional `TestStatus.SUSPICIOUS` enum value later |
 | **`controller/`** | Return `LoadTestResponse` — already sanitized by service |
-| **`config/`** | `maxResponseBytes`, allowed content types, timeouts |
+| **`config/`** | `maxResponseBytes`, allowed content types, timeouts *(not wired yet)* |
 
 Models should not perform validation logic — only hold the result.
 
 ---
 
-## Suggested `TestResponse` shape (after validation)
-
-Keep what you have; put **safe, bounded** text in `responseBody`:
+## Current `TestResponse` shape
 
 ```java
-// Examples of what responseBody might contain after validation:
-"{"id":"abc123"}"                    // normal small JSON
-"[truncated: 1.2 MB, sha256=ab12…]"  // over size limit
-"unexpected content-type: text/html" // suspicious
-"HTTP 502 Bad Gateway"               // non-2xx summary
+public record TestResponse(
+    int taskId,
+    TestStatus status,
+    String responseBody      // full UTF-8 body if under limit; summary if failed
+) {}
+```
+
+Examples of what `responseBody` contains today:
+
+```text
+"...json from target..."           // SUCCESS, body under 64 KB
+"HTTP 502"                         // non-2xx
+"[truncated: 2400000 bytes]"       // over size limit
+"connection timed out"             // exception message
 ```
 
 Optional later: add fields without bloating the object:
@@ -136,15 +160,9 @@ public record TestResponse(
 
 ---
 
-## Implementation approach (Strategy pattern)
+## Next step: Strategy pattern
 
-Define a small interface in `service/`:
-
-```java
-public interface ResponseValidator {
-    ValidatedResponse validate(int httpStatus, HttpHeaders headers, byte[] body);
-}
-```
+A `ValidatedResponse` record already exists:
 
 ```java
 public record ValidatedResponse(
@@ -154,31 +172,41 @@ public record ValidatedResponse(
 ) {}
 ```
 
-Default implementation: `DefaultResponseValidator` in `service/` with limits from `config/`.
+Extract checks behind:
 
-Workers call the validator once per task:
+```java
+public interface ResponseValidator {
+    ValidatedResponse validate(int httpStatus, /* headers */, byte[] body);
+}
+```
+
+Default implementation: `DefaultResponseValidator` in `services/` with limits from `config/`.
+
+Workers would then call:
 
 ```text
-byte[] body = readWithLimit(inputStream, maxBytes)
-ValidatedResponse v = responseValidator.validate(statusCode, headers, body)
+OutboundResponse raw = requestExecutor.send(targetUri, payload)
+ValidatedResponse v = responseValidator.validate(raw.statusCode(), headers, raw.body())
 results.set(taskId, new TestResponse(taskId, v.status(), v.safeBody()))
 ```
 
 ---
 
-## Configuration sketch
+## Configuration sketch (planned)
 
-In `application.yaml` (when you add config):
+In `application.yaml` when you externalize limits:
 
 ```yaml
 scale-testing:
   response:
-    max-body-bytes: 65536          # 64 KB
+    max-body-bytes: 65536          # 64 KB (matches current constant)
     allowed-content-types:
       - application/json
       - application/problem+json
     truncate-preview-chars: 200    # max chars stored in responseBody
 ```
+
+Today the limit is a private static constant, not a Spring property.
 
 ---
 
@@ -200,30 +228,22 @@ Start with `SUCCESS` / `FAILED` only; split `SUSPICIOUS` when you need finer rep
 
 ## Testing checklist
 
-Write unit tests for `ResponseValidator` (no Spring required):
+Covered by `LoadTestServiceTest` today (against httpbin):
+
+- [x] HTTP 200 + small body → `SUCCESS`
+- [x] Multiple payloads → all succeed
+- [x] HTTP 500 → `FAILED`
+
+Still worth adding as unit tests when you extract `ResponseValidator`:
 
 - [ ] Body under limit → `SUCCESS`, body preserved (or preview)
 - [ ] Body over limit → `FAILED`, truncated message, no full body stored
-- [ ] HTTP 500 → `FAILED`
 - [ ] HTTP 200 + `text/html` → `FAILED` or `SUSPICIOUS`
-- [ ] HTTP 200 + valid small JSON → `SUCCESS`
 - [ ] Empty body when JSON expected → `FAILED` or `SUSPICIOUS`
-
----
-
-## When to add this
-
-| Phase | Action |
-|-------|--------|
-| **Step 2** (service / engine) | Read response with a **byte limit** from day one |
-| **Step 2–3** | Add `ResponseValidator` before writing `TestResponse` |
-| **Step 4** (controller) | Ensure API never returns unbounded `responseBody` arrays |
-
-**Minimum viable guard:** even without a full validator class, cap bytes read and truncate before `new TestResponse(...)`. Expand into `ResponseValidator` when checks grow.
 
 ---
 
 ## Related docs
 
-- [MVC Structure](./mvc-structure.md) — where validation runs in the service layer
+- [MVC Structure](./mvc-structure.md) — where validation runs in the services layer
 - [Design Patterns](./design-patterns.md) — Strategy pattern for pluggable validators

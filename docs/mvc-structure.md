@@ -4,7 +4,7 @@ This project uses **Spring MVC** (REST API) with a simple three-layer layout. Ke
 
 ---
 
-## Recommended layout
+## Actual layout
 
 ```text
 src/main/java/io/github/williamntlam/scale_testing_platform/
@@ -13,13 +13,18 @@ src/main/java/io/github/williamntlam/scale_testing_platform/
 ├── controller/          # MVC — C (Controller)
 │   └── LoadTestController.java
 │
-├── service/             # MVC — business logic & orchestration
-│   └── LoadTestService.java
+├── services/            # MVC — business logic & orchestration
+│   ├── LoadTestService.java
+│   ├── HttpRequestExecutor.java
+│   └── port/
+│       ├── RequestExecutor.java
+│       ├── OutboundResponse.java
+│       └── ValidatedResponse.java   # reserved for pluggable validator
 │
 ├── model/               # MVC — M (Model)
 │   ├── LoadTestRequest.java
 │   ├── LoadTestResponse.java
-│   ├── Task.java
+│   ├── Task.java                    # unused by engine today; optional concept
 │   ├── TestResponse.java
 │   └── enums/
 │       └── TestStatus.java
@@ -27,11 +32,15 @@ src/main/java/io/github/williamntlam/scale_testing_platform/
 └── config/              # Spring wiring (not a fourth MVC layer)
     └── HttpClientConfig.java
 
-src/test/java/.../       # Mirror the packages above
+src/test/java/.../
 ├── controller/
-├── service/
+│   └── LoadTestControllerTest.java
+├── services/
+│   └── LoadTestServiceTest.java
 └── ScaleTestingPlatformApplicationTests.java
 ```
+
+Package name is **`services/`** (plural), not `service/`.
 
 For a REST API, the **View** is JSON — Spring serializes your model records automatically. You do not need a separate `view/` package unless you add HTML pages later.
 
@@ -57,30 +66,36 @@ For a REST API, the **View** is JSON — Spring serializes your model records au
 HTTP Request  →  Controller  →  Service  →  Controller  →  JSON Response
 ```
 
-### Service (`service/`)
+**Implemented:** `POST /api/load-tests/run` on `LoadTestController`.
 
-**Job:** Own the load-test workflow — fan-out, worker loop, fan-in, result aggregation.
+### Services (`services/`)
+
+**Job:** Own the load-test workflow — fan-out, per-task execution, fan-in, result aggregation.
 
 **Should do:**
 - Run the virtual-thread engine
-- Coordinate the list-driven fan-out loop, latch, and result collection
-- Call outbound HTTP (or delegate to a helper you inject)
-- **Validate target responses** — size limits, status codes, suspicious content before building `TestResponse` (see [Response Validation](./response-validation.md))
-- **Apply failure policies** — optional early abort when failures spike ([Failure Policies](./failure-policies.md))
+- Coordinate the list-driven fan-out loop, latch, semaphore, and result collection
+- Call outbound HTTP via `RequestExecutor` (injected)
+- **Validate target responses** — size limits and status codes before building `TestResponse` (see [Response Validation](./response-validation.md))
+- **Apply failure policies** — optional early abort when failures spike ([Failure Policies](./failure-policies.md)) *(planned)*
 
 **Should not do:**
 - Parse raw HTTP request details (headers, query params) — that belongs in the controller
 - Know about Spring MVC annotations
 
-This is where most of your README blueprint lives.
+**Implemented today:**
+- One virtual thread per payload + `CountDownLatch(totalTasks)` + `AtomicReferenceArray` fan-in
+- `Semaphore(concurrencyLimit)` for max in-flight
+- Non-2xx and body > 64 KB → `FAILED`
+- Strategy: `RequestExecutor` / `HttpRequestExecutor`
 
 ### Model (`model/`)
 
 **Job:** Data shapes only — records, enums, simple validation in compact constructors.
 
 **Examples:**
-- `LoadTestRequest` — payloads, concurrency, target URI
-- `LoadTestResponse` — results + success/failure counts
+- `LoadTestRequest` — payloads, concurrency, target URI (validates non-empty payloads, concurrency ≥ 1, non-null URI)
+- `LoadTestResponse` — results + success/failure counts (counts must match array length)
 - `Task`, `TestResponse` — internal execution units
 
 **Should not do:**
@@ -93,7 +108,7 @@ Keep models as **immutable records** where possible (`public record ...`).
 
 **Job:** Spring `@Configuration` classes — beans like `HttpClient`, property binding.
 
-Register **one thread-safe `HttpClient` bean** here and inject it into `LoadTestService`. Pass it explicitly into each virtual thread via lambda capture — do not use `ThreadLocal`. Use `ScopedValue` only for lightweight run metadata on deep call stacks ([Enterprise Scale](./enterprise-scale.md)).
+**Implemented:** `HttpClientConfig` registers one thread-safe HTTP/2 `HttpClient` bean (10s connect timeout, no redirects). Inject it into `HttpRequestExecutor`; do not use `ThreadLocal`. Use `ScopedValue` only for lightweight run metadata on deep call stacks ([Enterprise Scale](./enterprise-scale.md)).
 
 Not part of classic MVC, but standard in Spring Boot projects.
 
@@ -102,44 +117,37 @@ Not part of classic MVC, but standard in Spring Boot projects.
 ## Dependency rules
 
 ```text
-controller  →  service  →  model
-config      →  wires beans (service, HttpClient)
+controller  →  services  →  model
+            →  services/port (interfaces)
+config      →  wires beans (HttpClient → HttpRequestExecutor → LoadTestService)
 ```
 
 | From | Can import | Cannot import |
 |------|------------|---------------|
-| `controller` | `service`, `model` | — |
-| `service` | `model` | `controller` |
-| `model` | JDK only | `service`, `controller`, Spring |
+| `controller` | `services`, `model` | — |
+| `services` | `model`, `services/port` | `controller` |
+| `model` | JDK only | `services`, `controller`, Spring |
 
 **Rule of thumb:** dependencies point downward. Models never depend on services; services never depend on controllers.
 
 ---
 
-## Suggested build order (for you to implement)
+## Build status
 
-1. **Model** — define `LoadTestRequest`, `LoadTestResponse`, `Task`, `TestResponse`
-2. **Service** — implement the Loom-idiomatic engine (**one virtual thread per task**, `CountDownLatch(totalTasks)`, `AtomicReferenceArray` fan-in). See [Enterprise Scale](./enterprise-scale.md). Cap and validate response bodies ([Response Validation](./response-validation.md)).
-3. **Config** — register a shared `HttpClient` bean
-4. **Controller** — expose `POST /api/load-tests/run`
-5. **Tests** — service unit tests first (fast, no Spring), then controller tests
+| Step | Status |
+|------|--------|
+| Model — `LoadTestRequest`, `LoadTestResponse`, `Task`, `TestResponse` | **Done** |
+| Services — Loom-idiomatic engine + basic response checks | **Done** |
+| Config — shared `HttpClient` bean | **Done** |
+| Controller — `POST /api/load-tests/run` | **Done** |
+| Tests — service + controller | **Done** |
+| Pluggable `ResponseValidator`, failure policies, pacing, Claim Check | Planned |
 
----
-
-## Maven dependency
-
-Add web support when you start the controller:
-
-```xml
-<dependency>
-    <groupId>org.springframework.boot</groupId>
-    <artifactId>spring-boot-starter-web</artifactId>
-</dependency>
-```
+Web support is already on the classpath via `spring-boot-starter-web`.
 
 ---
 
-## API sketch
+## API
 
 ```http
 POST /api/load-tests/run
@@ -162,6 +170,8 @@ Content-Type: application/json
 }
 ```
 
+`LoadTestRequest` rejects empty payloads, `concurrencyLimit < 1`, or a null `targetUri` with `IllegalArgumentException`.
+
 ---
 
 ## When to refactor
@@ -170,9 +180,9 @@ Stay on MVC until one of these happens:
 
 | Signal | Action |
 |--------|--------|
-| `LoadTestService` exceeds ~200 lines | Extract engine into `service/ScaleTestingEngine` |
-| Multiple transport types (HTTP, gRPC, Kafka) | Introduce a `RequestExecutor` interface (Strategy pattern) |
+| `LoadTestService` exceeds ~200 lines | Extract engine into `services/ScaleTestingEngine` |
+| Multiple transport types (HTTP, gRPC, Kafka) | Add more `RequestExecutor` implementations (Strategy — interface already exists) |
 | Scenario definitions get complex | Add `model/scenario/` or a dedicated builder |
 | You need persistence for run history | Add a `repository/` package for storage |
 
-You do not need those layers on day one.
+`RequestExecutor` already supports swap-in transports without rewriting the fan-out loop.

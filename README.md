@@ -1,6 +1,26 @@
 # Scale Testing Platform
 
-A lock-free, virtual-threaded benchmarking and traffic-generation engine built in Java 21. Designed to simulate massive enterprise workloads (high-volume media ingestion, financial transaction processing) with high throughput and minimal lock contention — when implemented with **Project Loom idioms**, not legacy thread-pool patterns.
+A lock-free, virtual-threaded benchmarking and traffic-generation engine built in Java 21 / Spring Boot 4. Designed to simulate massive enterprise workloads (high-volume media ingestion, financial transaction processing) with high throughput and minimal lock contention — using **Project Loom idioms**, not legacy thread-pool patterns.
+
+---
+
+## Current status
+
+| Area | Status |
+|------|--------|
+| List-driven fan-out (one VT per payload) | **Done** — `LoadTestService` |
+| Lock-free fan-in (`AtomicReferenceArray` + latch) | **Done** |
+| Max in-flight (`Semaphore`) | **Done** — via `concurrencyLimit` |
+| Shared HTTP/2 `HttpClient` bean | **Done** — `HttpClientConfig` |
+| `RequestExecutor` Strategy + `HttpRequestExecutor` | **Done** |
+| REST API `POST /api/load-tests/run` | **Done** — `LoadTestController` |
+| Response size cap + non-2xx → `FAILED` | **Done** — inline in `LoadTestService` (64 KB) |
+| Pacing / target RPS | Planned |
+| Claim Check / `PayloadStore` | Planned |
+| Pluggable `ResponseValidator` | Planned (`ValidatedResponse` record exists) |
+| Failure policies / circuit breaker | Planned |
+| Live metrics (`LongAdder` + ring buffer) | Planned |
+| JIT warm-up phase | Planned |
 
 ---
 
@@ -16,11 +36,11 @@ Important nuance at enterprise scale:
 - Virtual threads excel when tasks are **short-lived and I/O-bound** — spawn **one virtual thread per request**, not a fixed pool of workers polling a queue.
 - **Carrier pinning** (`synchronized` in libraries) silently destroys throughput — update **Logback/Log4j2** to versions that use `ReentrantLock` instead of `synchronized` where possible; detect pins with `-Djdk.tracePinnedThreads=full` during testing.
 - **Heavy dependencies** (`HttpClient`, executors) — instantiate once at the app root; **pass explicitly** into each virtual thread (highest performance). Use `ScopedValue` only for lightweight run metadata on deep stacks.
-- **Claim Check** means the **payload list** carries **lightweight tokens**; each virtual thread **resolves and streams** heavy data at send time — not `ofString(token)` on the wire.
+- **Claim Check** means the **payload list** carries **lightweight tokens**; each virtual thread **resolves and streams** heavy data at send time — not `ofString(token)` on the wire. *(Not yet implemented — payloads are currently inline strings.)*
 - **No `BlockingQueue`** — with one virtual thread per request, iterate `List<String>` (or a stream) directly; the data drives the loop ([enterprise-scale.md](docs/enterprise-scale.md)).
-- **Steady-state load** requires explicit **pacing** (token bucket / target RPS), not max-out submission alone.
+- **Steady-state load** requires explicit **pacing** (token bucket / target RPS), not max-out submission alone. *(Semaphore limits concurrency today; RPS pacing is planned.)*
 
-See [docs/enterprise-scale.md](docs/enterprise-scale.md) for pitfalls, fixes, and rollout phases.
+See [docs/enterprise-scale.md](docs/enterprise-scale.md) for pitfalls, fixes, and remaining rollout phases.
 
 ---
 
@@ -32,7 +52,7 @@ Virtual threads map onto a small set of carrier threads. When a virtual thread b
 
 - Blocking HTTP → virtual thread yields (if not **pinned**)
 - Carriers stay busy with other virtual threads
-- **Anti-pattern:** long-lived “worker loops” that poll a queue — use **one virtual thread per task** instead (see blueprint below)
+- **Anti-pattern:** long-lived “worker loops” that poll a queue — use **one virtual thread per task** instead
 
 ### 2. Lock-Free Fan-In (`AtomicReferenceArray`)
 
@@ -42,7 +62,7 @@ Each task has a unique index. Workers write only to `results[taskId]` — no loc
 - Suitable for **final per-task reports**
 - For **live RPS / P99**, add `LongAdder` and a latency ring buffer (not array scans) — [enterprise-scale.md](docs/enterprise-scale.md)
 
-### 3. Claim Check Pipeline
+### 3. Claim Check Pipeline (planned)
 
 Heavy assets stay off the hot execution path. The **list holds tokens only**; each virtual thread **resolves and streams** at send time.
 
@@ -55,60 +75,58 @@ HttpClient           →  BodyPublishers.ofFile(path) or streaming BodyPublisher
 Target API           →  receives bytes, not the token string
 ```
 
+Today, `payloads` are small inline strings posted via `BodyPublishers.ofString`.
+
 ---
 
 ## Tech Stack & Prerequisites
 
 - **Language:** Java 21+ (Virtual Threads / Loom)
+- **Framework:** Spring Boot 4.1
 - **Build:** Maven (`./mvnw`)
-- **HTTP:** `java.net.http.HttpClient`
+- **HTTP:** `java.net.http.HttpClient` (HTTP/2 preferred)
 - **Concurrency:** `java.util.concurrent`, `java.util.concurrent.atomic`
 - **App structure:** Spring Boot MVC — see [docs/mvc-structure.md](docs/mvc-structure.md)
 
 ---
 
-## Target Implementation Blueprint (Loom-idiomatic)
+## How the engine works (implemented)
 
-This is the **recommended** engine shape for `LoadTestService`. The main thread walks the payload **list** and submits one virtual thread per item — **no `BlockingQueue`**.
+`LoadTestService.run()` walks the payload list and submits one virtual thread per item. A `Semaphore` caps in-flight work; a `CountDownLatch` waits for all tasks.
 
 ```text
-List<String> payloads  →  for each index i  →  executor.submit(task i)
-                                              →  results[i] = TestResponse
-                                              →  done.countDown()
+List<String> payloads  →  for each index i
+                            →  semaphore.acquire()
+                            →  executor.submit(task i)
+                              →  results[i] = TestResponse
+                              →  semaphore.release()
+                              →  done.countDown()
 ```
+
+Core flow (mirrors current code):
 
 ```java
 public LoadTestResponse run(LoadTestRequest request) throws InterruptedException {
-    List<String> payloadRefs = request.payloads();
-    int totalTasks = payloadRefs.size();
+    List<String> payloads = request.payloads();
+    int totalTasks = payloads.size();
 
     AtomicReferenceArray<TestResponse> results = new AtomicReferenceArray<>(totalTasks);
     CountDownLatch done = new CountDownLatch(totalTasks);
+    Semaphore inFlight = new Semaphore(request.concurrencyLimit());
 
-    HttpClient httpClient = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(10))
-            .followRedirects(HttpClient.Redirect.NEVER)
-            .build();
-
-    // One virtual thread per task — not a fixed pool of polling workers
     try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
         for (int i = 0; i < totalTasks; i++) {
             final int taskId = i;
-            final String payloadRef = payloadRefs.get(i);
+            final String payload = payloads.get(i);
 
-            // Future: pacingStrategy.acquire();  // target RPS
-            // Future: payloadStore.openStream(payloadRef) for Claim Check
-
+            inFlight.acquire();
             executor.submit(() -> {
                 try {
-                    String body = resolvePayload(payloadRef); // token → bytes/string at send time
-                    String reply = executeNetworkCall(httpClient, request.targetUri(), body);
-                    results.set(taskId, new TestResponse(taskId, TestStatus.SUCCESS, reply));
-                }
-                catch (Exception e) {
+                    results.set(taskId, executeTask(taskId, request.targetUri(), payload));
+                } catch (Exception e) {
                     results.set(taskId, new TestResponse(taskId, TestStatus.FAILED, e.getMessage()));
-                }
-                finally {
+                } finally {
+                    inFlight.release();
                     done.countDown();
                 }
             });
@@ -116,34 +134,19 @@ public LoadTestResponse run(LoadTestRequest request) throws InterruptedException
         done.await();
     }
 
-    return aggregateResults(results);
-}
-
-private static String resolvePayload(String payloadRef) {
-    // v1: inline JSON string
-    // v2: read file / object store from token — stream, do not queue megabytes
-    return payloadRef;
-}
-
-private static String executeNetworkCall(HttpClient client, URI targetUri, String body) throws Exception {
-    HttpRequest request = HttpRequest.newBuilder()
-            .uri(targetUri)
-            .POST(HttpRequest.BodyPublishers.ofString(body))
-            .timeout(Duration.ofSeconds(30))
-            .build();
-    return client.send(request, HttpResponse.BodyHandlers.ofString()).body();
+    return aggregate(results);
 }
 ```
 
-### Concurrency & pacing (planned)
+Outbound HTTP goes through `RequestExecutor` (implemented by `HttpRequestExecutor` with the shared `HttpClient` bean). After each call, the service treats non-2xx as `FAILED` and rejects bodies larger than **65,536 bytes**.
 
-| Mode | Mechanism |
-|------|-----------|
-| Unlimited (stress) | Submit all tasks; optional batching for millions of tasks |
-| Max in-flight | `Semaphore(concurrencyLimit)` before submit |
-| Steady RPS | Token bucket / `pacingStrategy.acquire()` per submit |
+### Concurrency & pacing
 
-Configure via `LoadTestRequest` or `application.yaml` — see [docs/enterprise-scale.md](docs/enterprise-scale.md).
+| Mode | Mechanism | Status |
+|------|-----------|--------|
+| Max in-flight | `Semaphore(concurrencyLimit)` before submit | **Done** |
+| Unlimited (stress) | Set `concurrencyLimit` very high | Possible today |
+| Steady RPS | Token bucket / `pacingStrategy.acquire()` | Planned |
 
 ---
 
@@ -172,7 +175,7 @@ Full detail: [docs/enterprise-scale.md](docs/enterprise-scale.md).
 
 | Doc | Topic |
 |-----|--------|
-| [docs/mvc-structure.md](docs/mvc-structure.md) | Controller / service / model layout |
+| [docs/mvc-structure.md](docs/mvc-structure.md) | Controller / services / model layout |
 | [docs/design-patterns.md](docs/design-patterns.md) | Fan-out/fan-in, Strategy, Claim Check, Circuit Breaker |
 | [docs/response-validation.md](docs/response-validation.md) | Response size limits, suspicious content |
 | [docs/failure-policies.md](docs/failure-policies.md) | Fail-fast, circuit breaker, when to stop |
@@ -194,11 +197,36 @@ Full detail: [docs/enterprise-scale.md](docs/enterprise-scale.md).
 
 ---
 
+## API
+
+```http
+POST /api/load-tests/run
+Content-Type: application/json
+
+{
+  "payloads": ["{\"event\":\"ping\"}"],
+  "concurrencyLimit": 10,
+  "targetUri": "https://httpbin.org/post"
+}
+```
+
+```json
+{
+  "responses": [
+    { "taskId": 0, "status": "SUCCESS", "responseBody": "..." }
+  ],
+  "successCount": 1,
+  "failureCount": 0
+}
+```
+
+---
+
 ## Build & test
 
 ```bash
-bash mvnw test
-bash mvnw spring-boot:run
+./mvnw test
+./mvnw spring-boot:run
 ```
 
 Pinning check (during load tests):

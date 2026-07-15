@@ -2,7 +2,20 @@
 
 When many requests fail in a row — or failure rate spikes — should the load test **stop**? **Keep going**? **Pause**?
 
-There is no single right answer. It depends on **why** you're running the test. This doc explains the options so you can pick a policy and implement it in `service/` during Step 2 or 3.
+There is no single right answer. It depends on **why** you're running the test. This doc explains the options so you can pick a policy and implement it in `services/`.
+
+---
+
+## Current status
+
+| Behavior | Status |
+|----------|--------|
+| Process every payload regardless of failures | **Done** — equivalent to `RUN_TO_COMPLETION` |
+| Track `successCount` / `failureCount` in response | **Done** |
+| `FAIL_FAST` / consecutive-failure abort | Planned |
+| Circuit breaker / sliding-window failure rate | Planned |
+| `RunOutcome` (`COMPLETED` / `ABORTED` / `DEGRADED`) on response | Planned |
+| Per-request or profile-based policy in `application.yaml` | Planned |
 
 ---
 
@@ -42,7 +55,7 @@ Define an enum (e.g. in `model/enums/RunAbortPolicy.java` or config-only at firs
 
 | Policy | Behavior |
 |--------|----------|
-| `RUN_TO_COMPLETION` | Default — process all tasks regardless of failures |
+| `RUN_TO_COMPLETION` | Default — process all tasks regardless of failures **(current behavior)** |
 | `FAIL_FAST` | Abort as soon as failure threshold is hit |
 | `CIRCUIT_BREAKER` | After threshold, **stop sending new work**; drain or cancel in-flight tasks |
 | `PAUSE_AND_RETRY` | Back off, retry later (advanced; rarely needed in v1) |
@@ -53,7 +66,7 @@ Expose the chosen policy on `LoadTestRequest` (optional field) or `application.y
 
 ## Signals to watch
 
-Track these **in the service layer** as workers complete tasks (thread-safe counters):
+Track these **in the services layer** as workers complete tasks (thread-safe counters):
 
 | Signal | Example threshold | Typical use |
 |--------|-------------------|-------------|
@@ -83,7 +96,7 @@ For your load tester, a simplified version is enough at first:
 
 ```text
 CLOSED  →  workers send requests
-OPEN    →  workers stop dequeuing new tasks OR skip HTTP and mark FAILED instantly
+OPEN    →  main loop stops submitting new tasks OR skip HTTP and mark FAILED instantly
 ```
 
 **Why not full Hystrix-style half-open?** You're not protecting a microservice caller — you're driving a test. Opening the circuit means: *“target looks dead; stop wasting resources.”*
@@ -95,12 +108,12 @@ Main thread iterates payloads list
         ↓
 CircuitBreaker.allowRequest()?  ──no──→  skip submit or mark FAILED ("circuit open")
         ↓ yes
-executor.submit → Send HTTP → validate response → TestResponse
+semaphore.acquire → executor.submit → Send HTTP → validate response → TestResponse
         ↓
 Record success/failure → maybe trip breaker
 ```
 
-Implement as `service/CircuitBreaker.java` or `service/FailureMonitor.java`.
+Implement as `services/CircuitBreaker.java` or `services/FailureMonitor.java`.
 
 ---
 
@@ -110,15 +123,15 @@ When abort triggers, two sub-options:
 
 | Mode | What happens |
 |------|----------------|
-| **Hard stop** | `CountDownLatch` / interrupt workers; return partial `LoadTestResponse` |
+| **Hard stop** | Interrupt workers; return partial `LoadTestResponse` |
 | **Drain in-flight** | Stop **submitting** new tasks; let in-flight virtual threads finish |
 | **Cancel in-flight** | Aggressive; use only if you must stop immediately |
 
-**Recommendation:** **Stop submitting new tasks + drain in-flight** — cleaner metrics, fewer orphaned HTTP calls.
+**Recommendation:** **Stop submitting new tasks + drain in-flight** — cleaner metrics, fewer orphaned HTTP calls. Fits cleanly with the existing list + semaphore loop: check an abort flag before each `acquire`/`submit`.
 
 ```text
 Main thread: stop the for-loop (or check abort flag before each submit)
-In-flight VTs: finish current HTTP call, write result, countDown latch
+In-flight VTs: finish current HTTP call, write result, release semaphore, countDown latch
 Fan-in: await latch, return results collected so far
 ```
 
@@ -146,7 +159,7 @@ public enum RunOutcome {
 }
 ```
 
-For Step 2, `COMPLETED` only is fine — add `ABORTED` when you implement policies.
+Today the response is only `(responses, successCount, failureCount)` — every run is implicitly `COMPLETED`.
 
 ---
 
@@ -155,7 +168,7 @@ For Step 2, `COMPLETED` only is fine — add `ABORTED` when you implement polici
 ```yaml
 scale-testing:
   failure-policy:
-    mode: RUN_TO_COMPLETION        # safe default for stress tests
+    mode: RUN_TO_COMPLETION        # matches current behavior; safe default for stress tests
     # Optional overrides per request or profile:
     consecutive-failure-limit: 0   # 0 = disabled
     failure-rate-threshold: 0.0    # 0 = disabled (e.g. 0.5 = 50%)
@@ -174,7 +187,7 @@ scale-testing:
     min-samples-before-abort: 5
 ```
 
-**Stress-test profile (your README use case):**
+**Stress-test profile:**
 
 ```yaml
 scale-testing:
@@ -187,7 +200,7 @@ scale-testing:
 
 ## Implementation sketch
 
-### `FailureMonitor` (service/)
+### `FailureMonitor` (services/)
 
 ```java
 public class FailureMonitor {
@@ -208,7 +221,7 @@ All counters must be atomic — multiple virtual threads update concurrently.
 
 ### Interaction with list-driven fan-out
 
-- **Main loop:** check `shouldAbort()` before each `executor.submit(...)` in the `for` loop over `payloads`
+- **Main loop:** check `shouldAbort()` before each `inFlight.acquire()` / `executor.submit(...)` in the `for` loop over `payloads`
 - **In-flight tasks:** already submitted VTs run to completion unless you implement cancellation (advanced)
 - Set a volatile `boolean aborted` or check `FailureMonitor.shouldAbort()` on each iteration
 
@@ -241,14 +254,14 @@ Integration test: mock executor that always fails → verify run ends early with
 
 ---
 
-## Phased rollout (for you to code)
+## Phased rollout
 
-| Phase | What to build |
-|-------|----------------|
-| **Step 2** | `RUN_TO_COMPLETION` only; track `successCount` / `failureCount` |
-| **Step 3** | `FailureMonitor` + `FAIL_FAST` on consecutive failures |
-| **Step 4** | Failure-rate window + `CIRCUIT_BREAKER` + `RunOutcome` on response |
-| **Later** | Per-request policy on `LoadTestRequest`, smoke vs stress profiles |
+| Phase | What to build | Status |
+|-------|----------------|--------|
+| **Now** | `RUN_TO_COMPLETION`; track `successCount` / `failureCount` | **Done** |
+| **Next** | `FailureMonitor` + `FAIL_FAST` on consecutive failures | Planned |
+| **Later** | Failure-rate window + `CIRCUIT_BREAKER` + `RunOutcome` on response | Planned |
+| **Later** | Per-request policy on `LoadTestRequest`, smoke vs stress profiles | Planned |
 
 ---
 
@@ -256,4 +269,4 @@ Integration test: mock executor that always fails → verify run ends early with
 
 - [Design Patterns](./design-patterns.md) — Circuit Breaker, Observer (metrics), Strategy (policy implementations)
 - [Response Validation](./response-validation.md) — what counts as a “failure” vs “suspicious”
-- [MVC Structure](./mvc-structure.md) — failure logic lives in `service/`, not controller
+- [MVC Structure](./mvc-structure.md) — failure logic lives in `services/`, not controller
