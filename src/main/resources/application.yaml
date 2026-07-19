@@ -1,3 +1,8 @@
 spring:
   application:
     name: scale-testing-platform
+
+scale-testing:
+  failure-policy:
+    consecutive-failure-limit: 5
+    absolute-failure-limit: 0  # 0 = disabled

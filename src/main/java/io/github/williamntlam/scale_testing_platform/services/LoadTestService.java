@@ -1,8 +1,10 @@
 package io.github.williamntlam.scale_testing_platform.services;
 
+import io.github.williamntlam.scale_testing_platform.config.FailurePolicyProperties;
 import io.github.williamntlam.scale_testing_platform.model.LoadTestRequest;
 import io.github.williamntlam.scale_testing_platform.model.LoadTestResponse;
 import io.github.williamntlam.scale_testing_platform.model.TestResponse;
+import io.github.williamntlam.scale_testing_platform.model.enums.RunOutcome;
 import io.github.williamntlam.scale_testing_platform.model.enums.TestStatus;
 import io.github.williamntlam.scale_testing_platform.services.port.OutboundResponse;
 import io.github.williamntlam.scale_testing_platform.services.port.RequestExecutor;
@@ -22,13 +24,19 @@ public class LoadTestService {
 
   private final RequestExecutor requestExecutor;
   private final ResponseValidator responseValidator;
+  private final FailurePolicyProperties failurePolicyProperties;
 
-  public LoadTestService(RequestExecutor requestExecutor, ResponseValidator responseValidator) {
+  public LoadTestService(
+      RequestExecutor requestExecutor,
+      ResponseValidator responseValidator,
+      FailurePolicyProperties failurePolicyProperties) {
     this.requestExecutor = requestExecutor;
     this.responseValidator = responseValidator;
+    this.failurePolicyProperties = failurePolicyProperties;
   }
 
-  private LoadTestResponse aggregate(AtomicReferenceArray<TestResponse> results) {
+  private LoadTestResponse aggregate(
+      AtomicReferenceArray<TestResponse> results, FailureMonitor monitor) {
     int total = results.length();
     TestResponse[] responses = new TestResponse[total];
 
@@ -46,7 +54,10 @@ public class LoadTestService {
       }
     }
 
-    return new LoadTestResponse(responses, successCount, failureCount);
+    RunOutcome outcome = monitor.shouldAbort() ? RunOutcome.ABORTED : RunOutcome.COMPLETED;
+
+    return new LoadTestResponse(
+        responses, successCount, failureCount, outcome, monitor.abortReason());
   }
 
   private TestResponse executeTask(int taskId, URI targetUri, String payload) throws Exception {
@@ -65,9 +76,24 @@ public class LoadTestService {
     AtomicReferenceArray<TestResponse> results = new AtomicReferenceArray<>(totalTasks);
     CountDownLatch done = new CountDownLatch(totalTasks);
     Semaphore inFlight = new Semaphore(request.concurrencyLimit());
+    FailureMonitor monitor =
+        new FailureMonitor(
+            request.abortPolicy(),
+            failurePolicyProperties.consecutiveFailureLimit(),
+            failurePolicyProperties.absoluteFailureLimit());
 
     try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
       for (int index = 0; index <= totalTasks - 1; index++) {
+
+        if (monitor.shouldAbort()) {
+          String reason = monitor.abortReason();
+          for (int skipped = index; skipped < totalTasks; skipped++) {
+            results.set(
+                skipped, new TestResponse(skipped, TestStatus.FAILED, "skipped: " + reason));
+            done.countDown();
+          }
+          break;
+        }
 
         final int taskId = index;
         final String payload = payloads.get(index);
@@ -79,8 +105,14 @@ public class LoadTestService {
               try {
                 TestResponse result = executeTask(taskId, request.targetUri(), payload);
                 results.set(taskId, result);
+                if (result.status() == TestStatus.SUCCESS) {
+                  monitor.recordSuccess();
+                } else {
+                  monitor.recordFailure();
+                }
               } catch (Exception e) {
                 results.set(taskId, new TestResponse(taskId, TestStatus.FAILED, e.getMessage()));
+                monitor.recordFailure();
               } finally {
                 inFlight.release();
                 done.countDown();
@@ -91,6 +123,6 @@ public class LoadTestService {
       done.await();
     }
 
-    return aggregate(results);
+    return aggregate(results, monitor);
   }
 }
