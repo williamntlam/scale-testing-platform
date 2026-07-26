@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.williamntlam.scale_testing_platform.config.FailurePolicyProperties;
+import io.github.williamntlam.scale_testing_platform.config.PacingProperties;
 import io.github.williamntlam.scale_testing_platform.model.LoadTestRequest;
 import io.github.williamntlam.scale_testing_platform.model.LoadTestResponse;
 import io.github.williamntlam.scale_testing_platform.model.enums.RunAbortPolicy;
@@ -23,6 +24,7 @@ import org.junit.jupiter.api.Test;
 class LoadTestServiceTest {
 
   private static final FailurePolicyProperties FAILURE_POLICY = new FailurePolicyProperties(5, 0);
+  private static final PacingProperties PACING = new PacingProperties(0); // unlimited
 
   private LoadTestService service;
 
@@ -31,7 +33,7 @@ class LoadTestServiceTest {
     HttpClient httpClient = HttpClient.newHttpClient();
     RequestExecutor requestExecutor = new HttpRequestExecutor(httpClient);
     ResponseValidator responseValidator = new DefaultResponseValidator();
-    service = new LoadTestService(requestExecutor, responseValidator, FAILURE_POLICY);
+    service = new LoadTestService(requestExecutor, responseValidator, FAILURE_POLICY, PACING);
   }
 
   @Test
@@ -89,7 +91,7 @@ class LoadTestServiceTest {
   void run_failFast_skipsRemainingAfterConsecutiveFailures() throws Exception {
     RequestExecutor alwaysFailing = (targetUri, payload) -> new OutboundResponse(500, new byte[0]);
     LoadTestService failFastService =
-        new LoadTestService(alwaysFailing, new DefaultResponseValidator(), FAILURE_POLICY);
+        new LoadTestService(alwaysFailing, new DefaultResponseValidator(), FAILURE_POLICY, PACING);
 
     LoadTestRequest request =
         new LoadTestRequest(
@@ -118,7 +120,7 @@ class LoadTestServiceTest {
     RequestExecutor alwaysFailing =
         (targetUri, payload) -> new OutboundResponse(500, "err".getBytes(StandardCharsets.UTF_8));
     LoadTestService completionService =
-        new LoadTestService(alwaysFailing, new DefaultResponseValidator(), FAILURE_POLICY);
+        new LoadTestService(alwaysFailing, new DefaultResponseValidator(), FAILURE_POLICY, PACING);
 
     LoadTestRequest request =
         new LoadTestRequest(

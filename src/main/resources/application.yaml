@@ -6,3 +6,5 @@ scale-testing:
   failure-policy:
     consecutive-failure-limit: 5
     absolute-failure-limit: 0  # 0 = disabled
+  pacing:
+    target-rps: 0  # 0 = unlimited (no pacing); e.g. 100 ≈ one start every 10ms

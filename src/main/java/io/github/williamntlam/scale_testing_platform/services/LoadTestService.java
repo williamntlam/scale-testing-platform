@@ -1,12 +1,14 @@
 package io.github.williamntlam.scale_testing_platform.services;
 
 import io.github.williamntlam.scale_testing_platform.config.FailurePolicyProperties;
+import io.github.williamntlam.scale_testing_platform.config.PacingProperties;
 import io.github.williamntlam.scale_testing_platform.model.LoadTestRequest;
 import io.github.williamntlam.scale_testing_platform.model.LoadTestResponse;
 import io.github.williamntlam.scale_testing_platform.model.TestResponse;
 import io.github.williamntlam.scale_testing_platform.model.enums.RunOutcome;
 import io.github.williamntlam.scale_testing_platform.model.enums.TestStatus;
 import io.github.williamntlam.scale_testing_platform.services.port.OutboundResponse;
+import io.github.williamntlam.scale_testing_platform.services.port.PacingStrategy;
 import io.github.williamntlam.scale_testing_platform.services.port.RequestExecutor;
 import io.github.williamntlam.scale_testing_platform.services.port.ResponseValidator;
 import io.github.williamntlam.scale_testing_platform.services.port.ValidatedResponse;
@@ -25,14 +27,24 @@ public class LoadTestService {
   private final RequestExecutor requestExecutor;
   private final ResponseValidator responseValidator;
   private final FailurePolicyProperties failurePolicyProperties;
+  private final PacingProperties pacingProperties;
 
   public LoadTestService(
       RequestExecutor requestExecutor,
       ResponseValidator responseValidator,
-      FailurePolicyProperties failurePolicyProperties) {
+      FailurePolicyProperties failurePolicyProperties,
+      PacingProperties pacingProperties) {
     this.requestExecutor = requestExecutor;
     this.responseValidator = responseValidator;
     this.failurePolicyProperties = failurePolicyProperties;
+    this.pacingProperties = pacingProperties;
+  }
+
+  private static PacingStrategy pacingFor(PacingProperties properties) {
+    if (properties.isUnlimited()) {
+      return new NoOpPacingStrategy();
+    }
+    return new TokenBucketPacingStrategy(properties.targetRps());
   }
 
   private LoadTestResponse aggregate(
@@ -76,6 +88,7 @@ public class LoadTestService {
     AtomicReferenceArray<TestResponse> results = new AtomicReferenceArray<>(totalTasks);
     CountDownLatch done = new CountDownLatch(totalTasks);
     Semaphore inFlight = new Semaphore(request.concurrencyLimit());
+    PacingStrategy pacing = pacingFor(pacingProperties);
     FailureMonitor monitor =
         new FailureMonitor(
             request.abortPolicy(),
@@ -98,6 +111,7 @@ public class LoadTestService {
         final int taskId = index;
         final String payload = payloads.get(index);
 
+        pacing.acquire();
         inFlight.acquire();
 
         executor.submit(
