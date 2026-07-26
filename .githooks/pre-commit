@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+echo "pre-commit: applying Spotless formatting..."
+./mvnw -q spotless:apply
+
+# Spotless may rewrite staged files; restage those paths so the commit includes formatting.
+mapfile -t STAGED < <(git diff --cached --name-only --diff-filter=ACMR || true)
+if ((${#STAGED[@]} > 0)); then
+  git add -- "${STAGED[@]}"
+fi
+
+echo "pre-commit: formatting applied."

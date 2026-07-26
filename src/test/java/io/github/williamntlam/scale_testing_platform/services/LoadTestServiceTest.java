@@ -13,9 +13,7 @@ import io.github.williamntlam.scale_testing_platform.model.enums.RunOutcome;
 import io.github.williamntlam.scale_testing_platform.model.enums.TestStatus;
 import io.github.williamntlam.scale_testing_platform.services.port.OutboundResponse;
 import io.github.williamntlam.scale_testing_platform.services.port.RequestExecutor;
-import io.github.williamntlam.scale_testing_platform.services.port.ResponseValidator;
 import java.net.URI;
-import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
@@ -25,22 +23,20 @@ class LoadTestServiceTest {
 
   private static final FailurePolicyProperties FAILURE_POLICY = new FailurePolicyProperties(5, 0);
   private static final PacingProperties PACING = new PacingProperties(0); // unlimited
+  private static final byte[] OK_BODY = "ok".getBytes(StandardCharsets.UTF_8);
 
   private LoadTestService service;
 
   @BeforeEach
   void setUp() {
-    HttpClient httpClient = HttpClient.newHttpClient();
-    RequestExecutor requestExecutor = new HttpRequestExecutor(httpClient);
-    ResponseValidator responseValidator = new DefaultResponseValidator();
-    service = new LoadTestService(requestExecutor, responseValidator, FAILURE_POLICY, PACING);
+    RequestExecutor alwaysOk = (targetUri, payload) -> new OutboundResponse(200, OK_BODY);
+    service = new LoadTestService(alwaysOk, new DefaultResponseValidator(), FAILURE_POLICY, PACING);
   }
 
   @Test
   void run_singlePayload_returnsSuccess() throws Exception {
     LoadTestRequest request =
-        new LoadTestRequest(
-            List.of("{\"event\":\"ping\"}"), 1, URI.create("https://httpbin.org/post"));
+        new LoadTestRequest(List.of("{\"event\":\"ping\"}"), 1, URI.create("https://example.com"));
 
     LoadTestResponse response = service.run(request);
 
@@ -58,7 +54,7 @@ class LoadTestServiceTest {
         new LoadTestRequest(
             List.of("{\"event\":\"one\"}", "{\"event\":\"two\"}"),
             2,
-            URI.create("https://httpbin.org/post"));
+            URI.create("https://example.com"));
 
     LoadTestResponse response = service.run(request);
 
@@ -75,11 +71,15 @@ class LoadTestServiceTest {
 
   @Test
   void run_http500_returnsFailure() throws Exception {
-    LoadTestRequest request =
-        new LoadTestRequest(
-            List.of("{\"event\":\"ping\"}"), 1, URI.create("https://httpbin.org/status/500"));
+    RequestExecutor alwaysFailing =
+        (targetUri, payload) -> new OutboundResponse(500, "err".getBytes(StandardCharsets.UTF_8));
+    LoadTestService failingService =
+        new LoadTestService(alwaysFailing, new DefaultResponseValidator(), FAILURE_POLICY, PACING);
 
-    LoadTestResponse response = service.run(request);
+    LoadTestRequest request =
+        new LoadTestRequest(List.of("{\"event\":\"ping\"}"), 1, URI.create("https://example.com"));
+
+    LoadTestResponse response = failingService.run(request);
 
     assertEquals(1, response.failureCount());
     assertEquals(0, response.successCount());
