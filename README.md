@@ -15,10 +15,11 @@ A lock-free, virtual-threaded benchmarking and traffic-generation engine built i
 | `RequestExecutor` Strategy + `HttpRequestExecutor` | **Done** |
 | REST API `POST /api/load-tests/run` | **Done** — `LoadTestController` |
 | Response size cap + non-2xx → `FAILED` | **Done** — inline in `LoadTestService` (64 KB) |
-| Pacing / target RPS | Planned |
+| Pacing / target RPS | **Done** — `PacingStrategy` (`scale-testing.pacing.target-rps` or per-request `targetRps`) |
+| Pluggable `ResponseValidator` | **Done** — `DefaultResponseValidator` |
+| Failure policies (`FAIL_FAST`, consecutive/absolute limits) | **Done** — `FailureMonitor` + `RunOutcome` |
 | Claim Check / `PayloadStore` | Planned |
-| Pluggable `ResponseValidator` | Planned (`ValidatedResponse` record exists) |
-| Failure policies / circuit breaker | Planned |
+| Circuit breaker (sliding-window failure rate) | Planned |
 | Live metrics (`LongAdder` + ring buffer) | Planned |
 | JIT warm-up phase | Planned |
 
@@ -38,7 +39,7 @@ Important nuance at enterprise scale:
 - **Heavy dependencies** (`HttpClient`, executors) — instantiate once at the app root; **pass explicitly** into each virtual thread (highest performance). Use `ScopedValue` only for lightweight run metadata on deep stacks.
 - **Claim Check** means the **payload list** carries **lightweight tokens**; each virtual thread **resolves and streams** heavy data at send time — not `ofString(token)` on the wire. *(Not yet implemented — payloads are currently inline strings.)*
 - **No `BlockingQueue`** — with one virtual thread per request, iterate `List<String>` (or a stream) directly; the data drives the loop ([enterprise-scale.md](docs/enterprise-scale.md)).
-- **Steady-state load** requires explicit **pacing** (token bucket / target RPS), not max-out submission alone. *(Semaphore limits concurrency today; RPS pacing is planned.)*
+- **Steady-state load** requires explicit **pacing** (target RPS), not max-out submission alone. The semaphore limits concurrency; `PacingStrategy` spaces request **starts**.
 
 See [docs/enterprise-scale.md](docs/enterprise-scale.md) for pitfalls, fixes, and remaining rollout phases.
 
@@ -96,6 +97,7 @@ Today, `payloads` are small inline strings posted via `BodyPublishers.ofString`.
 
 ```text
 List<String> payloads  →  for each index i
+                            →  pacing.acquire()
                             →  semaphore.acquire()
                             →  executor.submit(task i)
                               →  results[i] = TestResponse
@@ -113,12 +115,14 @@ public LoadTestResponse run(LoadTestRequest request) throws InterruptedException
     AtomicReferenceArray<TestResponse> results = new AtomicReferenceArray<>(totalTasks);
     CountDownLatch done = new CountDownLatch(totalTasks);
     Semaphore inFlight = new Semaphore(request.concurrencyLimit());
+    PacingStrategy pacing = pacingFor(request.targetRps());
 
     try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
         for (int i = 0; i < totalTasks; i++) {
             final int taskId = i;
             final String payload = payloads.get(i);
 
+            pacing.acquire();
             inFlight.acquire();
             executor.submit(() -> {
                 try {
@@ -145,8 +149,16 @@ Outbound HTTP goes through `RequestExecutor` (implemented by `HttpRequestExecuto
 | Mode | Mechanism | Status |
 |------|-----------|--------|
 | Max in-flight | `Semaphore(concurrencyLimit)` before submit | **Done** |
-| Unlimited (stress) | Set `concurrencyLimit` very high | Possible today |
-| Steady RPS | Token bucket / `pacingStrategy.acquire()` | Planned |
+| Unlimited (stress) | Set `concurrencyLimit` very high; leave `targetRps` at `0` | **Done** |
+| Steady RPS | `pacing.acquire()` before the semaphore | **Done** |
+
+`concurrencyLimit` caps how many requests are **in flight**; `targetRps` caps how often a new request **starts**. With fast responses a small concurrency limit can still produce thousands of starts per second, which is why both knobs exist.
+
+```yaml
+scale-testing:
+  pacing:
+    target-rps: 0  # default when a run omits targetRps; 0 = unlimited
+```
 
 ---
 
@@ -206,9 +218,13 @@ Content-Type: application/json
 {
   "payloads": ["{\"event\":\"ping\"}"],
   "concurrencyLimit": 10,
-  "targetUri": "https://httpbin.org/post"
+  "targetUri": "https://httpbin.org/post",
+  "abortPolicy": "RUN_TO_COMPLETION",
+  "targetRps": 100
 }
 ```
+
+`abortPolicy` and `targetRps` are optional. Omitting `targetRps` uses the configured default; `0` disables pacing for that run.
 
 ```json
 {

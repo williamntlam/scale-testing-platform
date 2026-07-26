@@ -21,7 +21,8 @@ Implement only what you need today. Over-patterning early slows you down.
 | 9 | Template Method | `services/` | Planned — multiple test types sharing lifecycle |
 | 10 | Observer | `services/` + `controller/` | Planned — live progress / metrics |
 | 11 | Circuit Breaker | `services/` | Planned — repeated failures ([Failure Policies](./failure-policies.md)) |
-| — | ResponseValidator (Strategy) | `services/` | Planned — `ValidatedResponse` record already exists |
+| — | ResponseValidator (Strategy) | `services/` | **Done** — `ResponseValidator` + `DefaultResponseValidator` |
+| — | PacingStrategy (Strategy / Null Object) | `services/` | **Done** — `NoOpPacingStrategy` + `TokenBucketPacingStrategy` |
 
 ---
 
@@ -38,7 +39,7 @@ for (int i = 0; i < payloads.size(); i++) {
     final int taskId = i;
     final String payload = payloads.get(i);
     inFlight.acquire();                 // max in-flight (done)
-    // pacingStrategy.acquire();        // optional RPS (planned)
+    pacing.acquire();                   // optional target RPS (done)
     executor.submit(() -> runTask(taskId, payload));
 }
 done.await();
@@ -49,7 +50,7 @@ done.await();
 | Need | Use | Status |
 |------|-----|--------|
 | Max in-flight requests | `Semaphore(concurrencyLimit)` before `submit` | **Done** |
-| Steady RPS | Token bucket / `pacingStrategy.acquire()` before `submit` | Planned |
+| Steady RPS | `PacingStrategy.acquire()` before `submit` | **Done** |
 | Millions of tasks | Batch submission (submit chunk, await partial latch, repeat) | Planned |
 
 **Do not use:** `LinkedBlockingQueue<Task>`, worker loops with `poll()`, or `fanInGate(concurrencyLimit)`.
@@ -302,9 +303,9 @@ Phase 2 — Testability                        ✅ mostly DONE
   Inline response size/status checks
   Remaining: MockRequestExecutor in unit tests; ResponseValidator extraction
 
-Phase 3 — Real workloads                     Planned
+Phase 3 — Real workloads                     Partly DONE
+  Pacing: fixed-interval target RPS            ✅ DONE
   Claim Check: PayloadStore resolves tokens; stream bodies at send time
-  Pacing: token bucket / target RPS
   Builder for richer scenario config
 
 Phase 4 — Operations                         Planned

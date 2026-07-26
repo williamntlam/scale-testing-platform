@@ -18,7 +18,7 @@ Already in place:
 | Transport Strategy | `RequestExecutor` + `HttpRequestExecutor` | **Done** |
 | Response body safety | 64 KB cap + non-2xx → `FAILED` | **Done** (basic) |
 | Avoid heap pressure on large payloads | Claim Check — tokens in list; stream at send | Planned |
-| Simulate steady load | Token-bucket / target RPS | Planned |
+| Simulate steady load | `PacingStrategy` — fixed-interval target RPS | **Done** |
 | Live telemetry without blocking workers | `LongAdder` + lock-free ring buffer | Planned |
 | Detect carrier pinning | `-Djdk.tracePinnedThreads=full` in test runs | Ops practice |
 | Load-balance across target IPs | JVM DNS cache TTL | Ops practice |
@@ -236,28 +236,37 @@ executor.submit(() -> requestExecutor.send(targetUri, payload));
 
 ## 2. Structural blind spots
 
-### Coordinated pacing (rate limiting) — planned
+### Coordinated pacing (rate limiting) — done
 
 **Problem:** Max-out execution fires requests as fast as the NIC (and semaphore) allow — useful for peak stress, useless for “exactly 5,000 RPS steady state.”
 
-**What's needed:** A **token bucket** or **paced scheduler** before task submission:
+**Implemented:** a `PacingStrategy` (Strategy pattern) gate on the submitter thread, before the semaphore:
 
 ```text
 for each task:
-  rateLimiter.acquire()   // blocks virtual thread cheaply until token available
+  pacing.acquire()        // waits until the next start slot
   inFlight.acquire()
   executor.submit(...)
 ```
 
-Implementation sketch: `AtomicLong` next permit time, Guava `RateLimiter`, or a simple lock-free bucket. Place in `services/` — `RateLimiter` / `PacingStrategy` interface (Strategy pattern).
+| Class | Behavior |
+|-------|----------|
+| `NoOpPacingStrategy` | Pacing off — unlimited starts (max-out) |
+| `TokenBucketPacingStrategy` | One start every `1s / targetRps`, via `LockSupport.parkNanos` |
+
+The pacer runs on the **submitter** thread only; workers never call it, so there is no shared mutable rate state across virtual threads. A fresh strategy is created per run.
+
+Configure a default rate in YAML:
 
 ```yaml
 scale-testing:
   pacing:
-    target-rps: 5000        # 0 = unlimited (max-out)
+    target-rps: 0        # 0 = unlimited (max-out)
 ```
 
-Today only `concurrencyLimit` (semaphore) is available.
+Override per run with `targetRps` on `LoadTestRequest` (`null` = use the configured default, `0` = pacing off).
+
+Note: this is a **fixed-interval** pacer, not a true token bucket — it does not bank unused tokens for bursts.
 
 ---
 
@@ -406,7 +415,7 @@ public LoadTestResponse run(LoadTestRequest request) throws InterruptedException
             final int taskId = i;
             final String payloadRef = payloads.get(i);
 
-            // pacingStrategy.acquire(); // planned
+            pacing.acquire();
             inFlight.acquire();
 
             executor.submit(() -> {
@@ -435,7 +444,7 @@ public LoadTestResponse run(LoadTestRequest request) throws InterruptedException
 |------|-----|--------|
 | Max-out | High `concurrencyLimit` | Possible today |
 | Fixed parallelism | `Semaphore(concurrencyLimit)` | **Done** |
-| Target RPS | `pacingStrategy.acquire()` per submission | Planned |
+| Target RPS | `pacing.acquire()` per submission | **Done** |
 
 ---
 
@@ -449,7 +458,7 @@ public LoadTestResponse run(LoadTestRequest request) throws InterruptedException
 | **Step 3** | `RequestExecutor` Strategy + adapter | **Done** | [Design Patterns](./design-patterns.md) |
 | **Step 3** | Explicit dependency pass-in; no `ThreadLocal` | **Done** | This doc §1 |
 | **Step 3+** | Extract `ResponseValidator`; content-type / suspicious checks | Planned | [Response Validation](./response-validation.md) |
-| **Step 4** | Pacing / token bucket | Planned | This doc §2 |
+| **Step 4** | Pacing / target RPS | **Done** | This doc §2 |
 | **Step 5** | Claim Check + `PayloadStore` | Planned | This doc §2 |
 | **Step 6** | `LongAdder` metrics + ring buffer telemetry | Planned | This doc §2 |
 | **Step 7** | JIT warm-up phase (discarded) before measured run | Planned | This doc §3 |
@@ -470,7 +479,7 @@ Use before claiming a run is “enterprise ready”:
 - [x] **Stateless VTs** — task lambdas use locals + shared immutable refs only; no `ThreadLocal`
 - [ ] **Ports** — monitor `TIME_WAIT`; OS ephemeral range documented if max-out
 - [ ] **Warm-up** — 10k (or configured) throwaway requests before measured phase
-- [ ] **Pacing** — target RPS set if steady-state required
+- [x] **Pacing** — target RPS available (`scale-testing.pacing.target-rps` or per-request `targetRps`)
 - [x] **No BlockingQueue** — list-driven fan-out; one virtual thread per payload index
 - [ ] **Claim Check** — tokens in list; resolve and stream at send
 - [x] **Responses** — body size capped; non-2xx failed *(suspicious content still planned)*

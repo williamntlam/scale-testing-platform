@@ -40,11 +40,12 @@ public class LoadTestService {
     this.pacingProperties = pacingProperties;
   }
 
-  private static PacingStrategy pacingFor(PacingProperties properties) {
-    if (properties.isUnlimited()) {
+  private PacingStrategy pacingFor(Integer requestedRps) {
+    int targetRps = requestedRps != null ? requestedRps : pacingProperties.targetRps();
+    if (targetRps < 1) {
       return new NoOpPacingStrategy();
     }
-    return new TokenBucketPacingStrategy(properties.targetRps());
+    return new TokenBucketPacingStrategy(targetRps);
   }
 
   private LoadTestResponse aggregate(
@@ -88,7 +89,7 @@ public class LoadTestService {
     AtomicReferenceArray<TestResponse> results = new AtomicReferenceArray<>(totalTasks);
     CountDownLatch done = new CountDownLatch(totalTasks);
     Semaphore inFlight = new Semaphore(request.concurrencyLimit());
-    PacingStrategy pacing = pacingFor(pacingProperties);
+    PacingStrategy pacing = pacingFor(request.targetRps());
     FailureMonitor monitor =
         new FailureMonitor(
             request.abortPolicy(),

@@ -7,8 +7,8 @@ Reference guides for the Scale Testing Platform. Docs distinguish **what is impl
 | [MVC Structure](./mvc-structure.md) | Actual package layout (`services/`), layer responsibilities, live API |
 | [Design Patterns](./design-patterns.md) | Patterns mapped to this project — done vs remaining |
 | [Response Validation](./response-validation.md) | Size limits (done) and suspicious-content checks (planned) |
-| [Failure Policies](./failure-policies.md) | When to stop vs continue — currently always run-to-completion |
-| [Enterprise Scale](./enterprise-scale.md) | Loom idioms, pacing, Claim Check, pinning, live metrics |
+| [Failure Policies](./failure-policies.md) | When to stop vs continue — `FAIL_FAST` and limits are implemented |
+| [Enterprise Scale](./enterprise-scale.md) | Loom idioms, pacing (done), Claim Check, pinning, live metrics |
 
 **Suggested reading order**
 

@@ -20,11 +20,15 @@ public final class TokenBucketPacingStrategy implements PacingStrategy {
 
   @Override
   public void acquire() {
-    long now = System.nanoTime();
     long waitUntil = nextAllowedNanos;
-    if (now < waitUntil) {
+    long now = System.nanoTime();
+
+    // parkNanos may return before the deadline, so re-check the clock.
+    while (now < waitUntil) {
       LockSupport.parkNanos(waitUntil - now);
+      now = System.nanoTime();
     }
+
     nextAllowedNanos = Math.max(now, waitUntil) + intervalNanos;
   }
 }

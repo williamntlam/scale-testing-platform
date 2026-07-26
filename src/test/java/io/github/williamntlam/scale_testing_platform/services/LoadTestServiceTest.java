@@ -116,6 +116,54 @@ class LoadTestServiceTest {
   }
 
   @Test
+  void run_targetRpsOnRequest_spacesStarts() throws Exception {
+    RequestExecutor instant =
+        (targetUri, payload) -> new OutboundResponse(200, "ok".getBytes(StandardCharsets.UTF_8));
+    LoadTestService pacedService =
+        new LoadTestService(instant, new DefaultResponseValidator(), FAILURE_POLICY, PACING);
+
+    LoadTestRequest request =
+        new LoadTestRequest(
+            List.of("a", "b", "c", "d", "e"),
+            5,
+            URI.create("https://example.com"),
+            RunAbortPolicy.RUN_TO_COMPLETION,
+            20); // 20 RPS => 50ms between starts
+
+    long startNanos = System.nanoTime();
+    LoadTestResponse response = pacedService.run(request);
+    long elapsedMillis = (System.nanoTime() - startNanos) / 1_000_000;
+
+    assertEquals(5, response.successCount());
+    // 5 starts at 20 RPS means 4 intervals of 50ms; allow slack for scheduling.
+    assertTrue(elapsedMillis >= 150, "expected at least 150ms, got " + elapsedMillis);
+  }
+
+  @Test
+  void run_targetRpsZero_overridesConfiguredDefault() throws Exception {
+    RequestExecutor instant =
+        (targetUri, payload) -> new OutboundResponse(200, "ok".getBytes(StandardCharsets.UTF_8));
+    LoadTestService pacedService =
+        new LoadTestService(
+            instant, new DefaultResponseValidator(), FAILURE_POLICY, new PacingProperties(2));
+
+    LoadTestRequest request =
+        new LoadTestRequest(
+            List.of("a", "b", "c", "d"),
+            4,
+            URI.create("https://example.com"),
+            RunAbortPolicy.RUN_TO_COMPLETION,
+            0); // pacing off for this run despite the 2 RPS default
+
+    long startNanos = System.nanoTime();
+    LoadTestResponse response = pacedService.run(request);
+    long elapsedMillis = (System.nanoTime() - startNanos) / 1_000_000;
+
+    assertEquals(4, response.successCount());
+    assertTrue(elapsedMillis < 500, "expected unpaced run, got " + elapsedMillis);
+  }
+
+  @Test
   void run_runToCompletion_processesAllFailures() throws Exception {
     RequestExecutor alwaysFailing =
         (targetUri, payload) -> new OutboundResponse(500, "err".getBytes(StandardCharsets.UTF_8));

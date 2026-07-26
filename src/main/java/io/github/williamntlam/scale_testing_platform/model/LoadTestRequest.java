@@ -4,11 +4,24 @@ import io.github.williamntlam.scale_testing_platform.model.enums.RunAbortPolicy;
 import java.net.URI;
 import java.util.List;
 
+/**
+ * @param targetRps request-start rate for this run; {@code null} falls back to the configured
+ *     default, {@code 0} disables pacing.
+ */
 public record LoadTestRequest(
-    List<String> payloads, int concurrencyLimit, URI targetUri, RunAbortPolicy abortPolicy) {
+    List<String> payloads,
+    int concurrencyLimit,
+    URI targetUri,
+    RunAbortPolicy abortPolicy,
+    Integer targetRps) {
 
   public LoadTestRequest(List<String> payloads, int concurrencyLimit, URI targetUri) {
-    this(payloads, concurrencyLimit, targetUri, RunAbortPolicy.RUN_TO_COMPLETION);
+    this(payloads, concurrencyLimit, targetUri, RunAbortPolicy.RUN_TO_COMPLETION, null);
+  }
+
+  public LoadTestRequest(
+      List<String> payloads, int concurrencyLimit, URI targetUri, RunAbortPolicy abortPolicy) {
+    this(payloads, concurrencyLimit, targetUri, abortPolicy, null);
   }
 
   public LoadTestRequest {
@@ -23,6 +36,9 @@ public record LoadTestRequest(
     }
     if (abortPolicy == null) {
       abortPolicy = RunAbortPolicy.RUN_TO_COMPLETION;
+    }
+    if (targetRps != null && targetRps < 0) {
+      throw new IllegalArgumentException("targetRps must be non-negative");
     }
   }
 }

@@ -16,10 +16,16 @@ src/main/java/io/github/williamntlam/scale_testing_platform/
 ├── services/            # MVC — business logic & orchestration
 │   ├── LoadTestService.java
 │   ├── HttpRequestExecutor.java
+│   ├── DefaultResponseValidator.java
+│   ├── FailureMonitor.java
+│   ├── NoOpPacingStrategy.java
+│   ├── TokenBucketPacingStrategy.java
 │   └── port/
 │       ├── RequestExecutor.java
+│       ├── ResponseValidator.java
+│       ├── PacingStrategy.java
 │       ├── OutboundResponse.java
-│       └── ValidatedResponse.java   # reserved for pluggable validator
+│       └── ValidatedResponse.java
 │
 ├── model/               # MVC — M (Model)
 │   ├── LoadTestRequest.java
@@ -27,16 +33,23 @@ src/main/java/io/github/williamntlam/scale_testing_platform/
 │   ├── Task.java                    # unused by engine today; optional concept
 │   ├── TestResponse.java
 │   └── enums/
-│       └── TestStatus.java
+│       ├── TestStatus.java
+│       ├── RunAbortPolicy.java
+│       └── RunOutcome.java
 │
 └── config/              # Spring wiring (not a fourth MVC layer)
-    └── HttpClientConfig.java
+    ├── HttpClientConfig.java
+    ├── FailurePolicyProperties.java
+    └── PacingProperties.java
 
 src/test/java/.../
 ├── controller/
 │   └── LoadTestControllerTest.java
 ├── services/
-│   └── LoadTestServiceTest.java
+│   ├── LoadTestServiceTest.java
+│   ├── DefaultResponseValidatorTest.java
+│   ├── FailureMonitorTest.java
+│   └── TokenBucketPacingStrategyTest.java
 └── ScaleTestingPlatformApplicationTests.java
 ```
 
@@ -141,7 +154,8 @@ config      →  wires beans (HttpClient → HttpRequestExecutor → LoadTestSer
 | Config — shared `HttpClient` bean | **Done** |
 | Controller — `POST /api/load-tests/run` | **Done** |
 | Tests — service + controller | **Done** |
-| Pluggable `ResponseValidator`, failure policies, pacing, Claim Check | Planned |
+| Pluggable `ResponseValidator`, failure policies, pacing | **Done** |
+| Claim Check, live metrics, circuit breaker | Planned |
 
 Web support is already on the classpath via `spring-boot-starter-web`.
 
@@ -156,9 +170,13 @@ Content-Type: application/json
 {
   "payloads": ["{\"event\":\"ping\"}"],
   "concurrencyLimit": 10,
-  "targetUri": "https://api.target-system.internal/v1/ingest"
+  "targetUri": "https://api.target-system.internal/v1/ingest",
+  "abortPolicy": "RUN_TO_COMPLETION",
+  "targetRps": 100
 }
 ```
+
+`abortPolicy` and `targetRps` are optional; omit `targetRps` to use `scale-testing.pacing.target-rps`.
 
 ```json
 {
