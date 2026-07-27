@@ -2,5 +2,6 @@ package io.github.williamntlam.scale_testing_platform.model.enums;
 
 public enum RunAbortPolicy {
   RUN_TO_COMPLETION,
-  FAIL_FAST
+  FAIL_FAST,
+  CIRCUIT_BREAKER
 }
