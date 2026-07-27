@@ -21,7 +21,8 @@ import org.junit.jupiter.api.Test;
 
 class LoadTestServiceTest {
 
-  private static final FailurePolicyProperties FAILURE_POLICY = new FailurePolicyProperties(5, 0);
+  private static final FailurePolicyProperties FAILURE_POLICY =
+      new FailurePolicyProperties(5, 0, 100, 0.5);
   private static final PacingProperties PACING = new PacingProperties(0); // unlimited
   private static final byte[] OK_BODY = "ok".getBytes(StandardCharsets.UTF_8);
 
